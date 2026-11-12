@@ -1,0 +1,2790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FlowFix — Detect. Respond. Save Water.</title>
+<meta name="description" content="FlowFix: smart water-leak detection, student reporting and maintenance tracking for university hostels (academic prototype)." />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.3/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #F5FAFA; }
+  #root { min-height: 100vh; }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+/* ============================================================================================
+   DESIGN TOKENS
+============================================================================================ */
+
+const C = {
+  bg: "#F5FAFA",
+  surface: "#FFFFFF",
+  border: "#DCE8E7",
+  borderStrong: "#C3D6D4",
+  ink: "#0E2A32",
+  inkSoft: "#527276",
+  inkFaint: "#8AA3A5",
+  teal: "#0F766E",
+  tealDark: "#0A5852",
+  tealSoft: "#E4F3F1",
+  blue: "#0B6FA6",
+  blueSoft: "#E5F2F9",
+  amber: "#B45309",
+  amberSoft: "#FDF0DC",
+  orange: "#C2410C",
+  orangeSoft: "#FCE7D9",
+  red: "#B91C1C",
+  redSoft: "#FBE4E1",
+  green: "#15803D",
+  greenSoft: "#E3F3E6",
+  navyGrad1: "#0B3B3F",
+  navyGrad2: "#0F5E5A",
+};
+
+const FONT_IMPORT =
+  "@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap');";
+
+const GLOBAL_STYLE = `
+* { box-sizing: border-box; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: ${C.borderStrong}; border-radius: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+@keyframes ff-pulse { 0%{opacity:1} 50%{opacity:.3} 100%{opacity:1} }
+.ff-live-dot { animation: ff-pulse 1.6s ease-in-out infinite; }
+@keyframes ff-slide-in { from{opacity:0; transform:translateX(10px);} to{opacity:1; transform:translateX(0);} }
+@keyframes ff-flow { 0%{background-position:0% 0} 100%{background-position:200% 0} }
+.ff-flowline { background: linear-gradient(90deg, transparent, #5EEAD4, transparent); background-size:200% 100%; animation: ff-flow 3.2s linear infinite; }
+select, input, textarea, button { font-family: inherit; }
+button { cursor: pointer; }
+select:focus, input:focus, textarea:focus { outline: none; border-color: ${C.teal} !important; box-shadow: 0 0 0 3px ${C.tealSoft}; }
+table { border-collapse: collapse; }
+`;
+
+/* ============================================================================================
+   CORE DATA MODEL, SEED GENERATOR, REDUCER
+   (Sensor readings below are simulated in-browser for this prototype. A real deployment would
+   replace SIMULATE_LEAKAGE with readings pushed from hardware through a
+   POST /api/sensors/readings ingestion endpoint — see the Settings page for more.)
+============================================================================================ */
+
+const BLOCKS = ["A", "B", "C"];
+const ROOMS_BY_BLOCK = {
+  A: ["A-101", "A-102", "A-103", "A-104", "Ground Floor Washroom"],
+  B: ["B-201", "B-202", "B-203", "B-204", "Common Washroom"],
+  C: ["C-301", "C-302", "C-303", "Common Washroom"],
+};
+const STAFF = ["Ravi Kumar", "Kiran Reddy", "Anjali Rao", "Suresh Naidu"];
+
+let __seq = 1000;
+function nextId(prefix) {
+  __seq += 1;
+  return `${prefix}-${__seq}`;
+}
+
+function baselineFlow() {
+  return +(0.8 + Math.random() * 0.7).toFixed(1);
+}
+
+function severityForFlow(flow) {
+  if (flow >= 14) return "Critical";
+  if (flow >= 6) return "High";
+  if (flow >= 3) return "Medium";
+  return "Low";
+}
+
+function statusForFlow(flow) {
+  if (flow >= 14) return "Critical";
+  if (flow >= 6) return "Leakage Suspected";
+  if (flow >= 2.2) return "Watch";
+  return "Normal";
+}
+
+function estimateLoss(flow, minutes) {
+  return Math.round(flow * minutes);
+}
+
+function shortRoomLabel(room) {
+  return room.replace("Ground Floor Washroom", "GF Wash").replace("Common Washroom", "Cmn Wash");
+}
+
+function makeFixture({ block, floor, room, fixtureType, x, y }) {
+  return {
+    id: nextId("FX"),
+    sensorId: `SNS-${block}${floor === "Ground" ? "G" : floor}${String(Math.floor(Math.random() * 90) + 10)}`,
+    block,
+    floor,
+    room,
+    fixtureType,
+    status: "Normal",
+    flowRate: baselineFlow(),
+    lastUpdated: Date.now(),
+    x,
+    y,
+  };
+}
+
+function buildFixtures() {
+  const fixtures = [];
+  BLOCKS.forEach((block, bi) => {
+    const rooms = ROOMS_BY_BLOCK[block];
+    const blockX0 = 20 + bi * 280;
+    rooms.forEach((room, ri) => {
+      const isWashroom = room.toLowerCase().includes("washroom");
+      const floor = isWashroom ? "Ground" : String(Math.ceil((ri + 1) / 2));
+      const types = isWashroom ? ["Tap", "Toilet Flush", "Pipe Joint"] : ["Tap", "Hand Spray"];
+      const roomCol = ri % 2;
+      const roomRow = Math.floor(ri / 2);
+      const roomX = blockX0 + 30 + roomCol * 105;
+      const roomY = 80 + roomRow * 58;
+      types.forEach((fixtureType, ti) => {
+        fixtures.push(
+          makeFixture({
+            block,
+            floor,
+            room,
+            fixtureType,
+            x: roomX + ti * 15,
+            y: roomY,
+          })
+        );
+      });
+    });
+  });
+  return fixtures;
+}
+
+function sensorTimelineSeed(detectedAt) {
+  return [
+    { step: "Detected", at: detectedAt },
+    { step: "Alert Generated", at: detectedAt },
+  ];
+}
+function studentTimelineSeed(detectedAt) {
+  return [
+    { step: "Reported", at: detectedAt },
+    { step: "Management Notified", at: detectedAt },
+  ];
+}
+
+function makeIncident({ fixture, severity, source, detectedAt, description, reportedBy }) {
+  const flow = fixture.flowRate;
+  return {
+    id: nextId("FF"),
+    fixtureId: fixture.id,
+    block: fixture.block,
+    floor: fixture.floor,
+    room: fixture.room,
+    fixtureType: fixture.fixtureType,
+    severity,
+    status: "Reported",
+    source,
+    reportedBy: reportedBy || "Sensor Network",
+    detectedAt,
+    flowRate: flow,
+    estimatedWaterLoss: estimateLoss(flow, 6),
+    assignedTo: null,
+    description: description || `Abnormal flow detected at ${fixture.fixtureType.toLowerCase()}.`,
+    repairNotes: null,
+    rootCause: null,
+    partsUsed: null,
+    timeline: sensorTimelineSeed(detectedAt),
+  };
+}
+
+function seedState() {
+  const fixtures = buildFixtures();
+  const incidents = [];
+  const now = Date.now();
+  const HISTORICAL_STAFF = ["Kiran Reddy", "Anjali Rao", "Suresh Naidu"];
+
+  const historySeed = [
+    { offsetHrs: 96, resolved: true, flow: 8.2 },
+    { offsetHrs: 90, resolved: true, flow: 15.9 },
+    { offsetHrs: 72, resolved: true, flow: 6.5 },
+    { offsetHrs: 60, resolved: true, flow: 9.1 },
+    { offsetHrs: 48, resolved: true, flow: 16.8 },
+    { offsetHrs: 36, resolved: true, flow: 7.0 },
+    { offsetHrs: 30, resolved: false, flow: 7.4 },
+    { offsetHrs: 20, resolved: true, flow: 5.9 },
+    { offsetHrs: 10, resolved: false, flow: 14.6 },
+    { offsetHrs: 4, resolved: true, flow: 6.8 },
+  ];
+
+  historySeed.forEach((h, i) => {
+    const fx = fixtures[(i * 3 + 2) % fixtures.length];
+    const detectedAt = now - h.offsetHrs * 3600 * 1000;
+    const severity = severityForFlow(h.flow);
+    const inc = makeIncident({
+      fixture: { ...fx, flowRate: h.flow },
+      severity,
+      source: "Sensor (Simulated)",
+      detectedAt,
+      reportedBy: "Sensor Network",
+    });
+
+    if (h.resolved) {
+      const staff = HISTORICAL_STAFF[i % HISTORICAL_STAFF.length];
+      const notifyAt = detectedAt + 4 * 60 * 1000;
+      const assignAt = detectedAt + 9 * 60 * 1000;
+      const startAt = detectedAt + 22 * 60 * 1000;
+      const resolveAt = detectedAt + (35 + i * 3) * 60 * 1000;
+      inc.status = "Resolved";
+      inc.assignedTo = staff;
+      inc.repairNotes = "Replaced worn washer and re-sealed joint.";
+      inc.rootCause = "Worn washer / seal degradation.";
+      inc.partsUsed = "Rubber washer, thread seal tape";
+      inc.timeline.push(
+        { step: "Maintenance Notified", at: notifyAt },
+        { step: "Staff Assigned", at: assignAt },
+        { step: "Repair In Progress", at: startAt },
+        { step: "Resolved", at: resolveAt }
+      );
+    } else {
+      inc.status = i % 2 === 0 ? "Assigned" : "In Progress";
+      inc.assignedTo = HISTORICAL_STAFF[(i + 1) % HISTORICAL_STAFF.length];
+      const notifyAt = detectedAt + 3 * 60 * 1000;
+      const assignAt = detectedAt + 8 * 60 * 1000;
+      inc.timeline.push({ step: "Maintenance Notified", at: notifyAt }, { step: "Staff Assigned", at: assignAt });
+      if (inc.status === "In Progress") {
+        inc.timeline.push({ step: "Repair In Progress", at: assignAt + 6 * 60 * 1000 });
+      }
+      const liveFx = fixtures.find((f) => f.room === fx.room && f.fixtureType === fx.fixtureType && f.block === fx.block);
+      if (liveFx) {
+        liveFx.status = statusForFlow(h.flow);
+        liveFx.flowRate = h.flow;
+        liveFx.lastUpdated = detectedAt;
+      }
+    }
+    incidents.push(inc);
+  });
+
+  // A handful of past STUDENT-reported incidents, so both incident sources are visible from the start.
+  const studentHistorySeed = [
+    { offsetHrs: 80, block: "B", floor: "2", room: "B-203", fixtureType: "Hand Spray", problemType: "Leaking Hand Spray", severity: "Medium", student: "Priya Nair", staffIdx: 0, note: "Replaced the hand spray head and hose." },
+    { offsetHrs: 54, block: "C", floor: "Ground", room: "Common Washroom", fixtureType: "Toilet", problemType: "Continuous Water Flow", severity: "High", student: "Farhan Ali", staffIdx: 1, note: "Adjusted the flush valve float." },
+    { offsetHrs: 26, block: "A", floor: "1", room: "A-102", fixtureType: "Tap", problemType: "Leaking Tap", severity: "Low", student: "Sneha Pillai", staffIdx: 2, note: "Tightened the tap spindle nut." },
+  ];
+  studentHistorySeed.forEach((s, i) => {
+    const detectedAt = now - s.offsetHrs * 3600 * 1000;
+    const staff = HISTORICAL_STAFF[s.staffIdx % HISTORICAL_STAFF.length];
+    const notifyAt = detectedAt + 1 * 60 * 1000;
+    const reviewAt = detectedAt + 6 * 60 * 1000;
+    const assignAt = detectedAt + 12 * 60 * 1000;
+    const startAt = detectedAt + 30 * 60 * 1000;
+    const resolveAt = detectedAt + (40 + i * 5) * 60 * 1000;
+    incidents.push({
+      id: nextId("FF-RPT"),
+      fixtureId: null,
+      block: s.block,
+      floor: s.floor,
+      room: s.room,
+      fixtureType: s.fixtureType,
+      problemType: s.problemType,
+      severity: s.severity,
+      status: "Resolved",
+      source: "Student Report",
+      reportedBy: `${s.student.toLowerCase().replace(" ", ".")}@flowfix.demo`,
+      detectedAt,
+      flowRate: null,
+      estimatedWaterLoss: null,
+      assignedTo: staff,
+      description: `${s.problemType}: reported by a student near ${s.room}.`,
+      repairNotes: s.note,
+      rootCause: "Wear and tear on fixture components.",
+      partsUsed: null,
+      timeline: [
+        ...studentTimelineSeed(detectedAt),
+        { step: "Management Notified", at: notifyAt },
+        { step: "Under Review", at: reviewAt },
+        { step: "Staff Assigned", at: assignAt },
+        { step: "Repair In Progress", at: startAt },
+        { step: "Resolved", at: resolveAt },
+      ].filter((t, idx, arr) => arr.findIndex((x) => x.step === t.step) === idx),
+    });
+  });
+
+  const notifications = incidents.slice(0, 5).map((inc) => ({
+    id: nextId("NTF"),
+    title:
+      inc.status === "Resolved"
+        ? `Resolved: Block ${inc.block}-${inc.room} marked resolved`
+        : inc.source === "Student Report"
+        ? `Student report received — Block ${inc.block}, ${inc.room}`
+        : `Leakage detected in Block ${inc.block}, ${inc.room}`,
+    message: `${inc.fixtureType} · ${inc.severity} severity${inc.estimatedWaterLoss ? ` · ${inc.estimatedWaterLoss} L estimated loss` : ""}`,
+    type: inc.severity === "Critical" ? "critical" : "info",
+    read: true,
+    createdAt: inc.detectedAt,
+    incidentId: inc.id,
+  }));
+
+  return {
+    fixtures,
+    incidents,
+    notifications,
+    lastReportId: null,
+  };
+}
+
+function pushNotification(state, notif) {
+  state.notifications = [
+    { id: nextId("NTF"), read: false, createdAt: Date.now(), ...notif },
+    ...state.notifications,
+  ].slice(0, 40);
+}
+
+function reducer(state, action) {
+  switch (action.type) {
+    case "SIMULATE_LEAKAGE": {
+      const normal = state.fixtures.filter((f) => f.status === "Normal");
+      const pool = normal.length ? normal : state.fixtures;
+      const fixture = action.fixtureId
+        ? state.fixtures.find((f) => f.id === action.fixtureId)
+        : pool[Math.floor(Math.random() * pool.length)];
+      if (!fixture) return state;
+
+      const escalate = action.forceCritical || Math.random() < 0.35;
+      const flow = action.forceCritical
+        ? 15.4
+        : escalate
+        ? +(14 + Math.random() * 2.5).toFixed(1)
+        : +(6 + Math.random() * 3.5).toFixed(1);
+      const status = statusForFlow(flow);
+      const severity = severityForFlow(flow);
+      const detectedAt = Date.now();
+
+      const newFixtures = state.fixtures.map((f) =>
+        f.id === fixture.id ? { ...f, status, flowRate: flow, lastUpdated: detectedAt } : f
+      );
+      const incident = makeIncident({ fixture: { ...fixture, flowRate: flow }, severity, source: "Sensor (Simulated)", detectedAt });
+
+      const newState = { ...state, fixtures: newFixtures, incidents: [incident, ...state.incidents] };
+      pushNotification(newState, {
+        title: `${severity} leakage detected in Block ${fixture.block}, ${fixture.room}`,
+        message: `${fixture.fixtureType} · ${flow} L/min · Alert ${incident.id}`,
+        type: severity === "Critical" ? "critical" : "warning",
+        incidentId: incident.id,
+      });
+      return newState;
+    }
+
+    case "ACK_ALERT": {
+      const incidents = state.incidents.map((inc) => {
+        if (inc.id !== action.id || inc.status !== "Reported") return inc;
+        const step = inc.source === "Student Report" ? "Under Review" : "Maintenance Notified";
+        return { ...inc, status: "Under Review", timeline: [...inc.timeline, { step, at: Date.now() }] };
+      });
+      return { ...state, incidents };
+    }
+
+    case "ASSIGN_ALERT": {
+      const incidents = state.incidents.map((inc) => {
+        if (inc.id !== action.id || !["Under Review", "Reported"].includes(inc.status)) return inc;
+        return { ...inc, status: "Assigned", assignedTo: action.staff, timeline: [...inc.timeline, { step: "Staff Assigned", at: Date.now() }] };
+      });
+      const newState = { ...state, incidents };
+      const inc = incidents.find((i) => i.id === action.id);
+      if (inc) {
+        pushNotification(newState, {
+          title: `Maintenance job ${inc.id} assigned to ${action.staff}`,
+          message: `Block ${inc.block}-${inc.room} · ${inc.fixtureType}`,
+          type: "info",
+          incidentId: inc.id,
+        });
+      }
+      return newState;
+    }
+
+    case "START_REPAIR": {
+      const incidents = state.incidents.map((inc) =>
+        inc.id === action.id && inc.status === "Assigned"
+          ? { ...inc, status: "In Progress", timeline: [...inc.timeline, { step: "Repair In Progress", at: Date.now() }] }
+          : inc
+      );
+      return { ...state, incidents };
+    }
+
+    case "RESOLVE_ALERT": {
+      let resolved = null;
+      const incidents = state.incidents.map((inc) => {
+        if (inc.id !== action.id || inc.status !== "In Progress") return inc;
+        resolved = {
+          ...inc,
+          status: "Resolved",
+          repairNotes: action.notes,
+          rootCause: action.rootCause || null,
+          partsUsed: action.partsUsed || null,
+          timeline: [...inc.timeline, { step: "Resolved", at: Date.now() }],
+        };
+        return resolved;
+      });
+      if (!resolved) return state;
+      const fixtures = state.fixtures.map((f) =>
+        f.id === resolved.fixtureId ? { ...f, status: "Normal", flowRate: baselineFlow(), lastUpdated: Date.now() } : f
+      );
+      const newState = { ...state, incidents, fixtures };
+      pushNotification(newState, {
+        title: `Block ${resolved.block}-${resolved.room} leakage marked resolved`,
+        message: `${resolved.fixtureType} · repaired by ${resolved.assignedTo || "maintenance"}`,
+        type: "success",
+        incidentId: resolved.id,
+      });
+      return newState;
+    }
+
+    case "SUBMIT_STUDENT_REPORT": {
+      const { block, floor, room, fixtureType, problemType, description, urgency, reporter, forceId } = action.payload;
+      const detectedAt = Date.now();
+      const incident = {
+        id: forceId || nextId("FF-RPT"),
+        fixtureId: null,
+        block,
+        floor,
+        room,
+        fixtureType,
+        problemType,
+        severity: urgency || "Medium",
+        status: "Reported",
+        source: "Student Report",
+        reportedBy: reporter || "Student",
+        detectedAt,
+        flowRate: null,
+        estimatedWaterLoss: null,
+        assignedTo: null,
+        description: `${problemType}: ${description}`,
+        repairNotes: null,
+        rootCause: null,
+        partsUsed: null,
+        timeline: studentTimelineSeed(detectedAt),
+      };
+      const dedupedIncidents = forceId ? state.incidents.filter((i) => i.id !== forceId) : state.incidents;
+      const newState = { ...state, incidents: [incident, ...dedupedIncidents], lastReportId: incident.id };
+      pushNotification(newState, {
+        title: `New student report — Block ${block}, ${room}`,
+        message: `${incident.id} · ${problemType}`,
+        type: "info",
+        incidentId: incident.id,
+      });
+      return newState;
+    }
+
+    case "MARK_NOTIF_READ": {
+      return { ...state, notifications: state.notifications.map((n) => (n.id === action.id ? { ...n, read: true } : n)) };
+    }
+    case "MARK_ALL_READ": {
+      return { ...state, notifications: state.notifications.map((n) => ({ ...n, read: true })) };
+    }
+    case "RESET_DEMO": {
+      return seedState();
+    }
+    default:
+      return state;
+  }
+}
+
+/* ---------------------------------- Derived / analytics helpers ---------------------------------- */
+
+function computeKpis(state) {
+  const { fixtures, incidents } = state;
+  const now = Date.now();
+  const activeLeaks = fixtures.filter((f) => f.status === "Leakage Suspected" || f.status === "Critical").length;
+  const waterLossToday = incidents
+    .filter((i) => i.estimatedWaterLoss != null && now - i.detectedAt < 24 * 3600 * 1000)
+    .reduce((s, i) => s + i.estimatedWaterLoss, 0);
+  const resolvedThisMonth = incidents.filter((i) => i.status === "Resolved" && now - i.detectedAt < 30 * 24 * 3600 * 1000).length;
+
+  const responseTimes = [];
+  incidents.forEach((i) => {
+    const assignedEvt = i.timeline.find((t) => t.step === "Staff Assigned");
+    if (assignedEvt) responseTimes.push((assignedEvt.at - i.detectedAt) / 60000);
+  });
+  const avgResponseTime = responseTimes.length ? Math.round(responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length) : 0;
+
+  const estimatedWaterSaved = incidents.reduce((sum, i) => {
+    if (i.status !== "Resolved" || !i.flowRate) return sum;
+    const resolvedEvt = i.timeline.find((t) => t.step === "Resolved");
+    const resolvedAt = resolvedEvt ? resolvedEvt.at : i.detectedAt;
+    const minutesToFix = Math.max(1, Math.round((resolvedAt - i.detectedAt) / 60000));
+    const avoidedMinutes = Math.max(0, 24 * 60 - minutesToFix);
+    return sum + Math.round(i.flowRate * avoidedMinutes);
+  }, 0);
+
+  const openJobs = incidents.filter((i) => ["Assigned", "In Progress"].includes(i.status)).length;
+  return { activeLeaks, waterLossToday, resolvedThisMonth, avgResponseTime, estimatedWaterSaved, openJobs };
+}
+
+function buildTrend(incidents, days) {
+  const now = Date.now();
+  const dayMs = 24 * 3600 * 1000;
+  const arr = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const dayStart = now - i * dayMs;
+    const label = new Date(dayStart).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    const baseline = Math.round(420 + 160 * Math.sin(i * 0.45) + (i % 5) * 22);
+    const dayIncidentLoss = incidents
+      .filter((inc) => inc.estimatedWaterLoss && Math.floor((now - inc.detectedAt) / dayMs) === i)
+      .reduce((s, inc) => s + inc.estimatedWaterLoss, 0);
+    arr.push({ day: label, loss: baseline + dayIncidentLoss });
+  }
+  return arr;
+}
+
+function incidentsByBlock(incidents) {
+  return BLOCKS.map((b) => ({ block: `Block ${b}`, count: incidents.filter((i) => i.block === b).length }));
+}
+function incidentsByFixtureType(incidents) {
+  const types = ["Tap", "Hand Spray", "Toilet Flush", "Pipe Joint"];
+  return types.map((t) => ({ type: t, count: incidents.filter((i) => i.fixtureType === t).length }));
+}
+function resolutionSplit(incidents) {
+  const resolvedCount = incidents.filter((i) => i.status === "Resolved").length;
+  return [
+    { name: "Resolved", value: resolvedCount },
+    { name: "Open", value: incidents.length - resolvedCount },
+  ];
+}
+
+/* ---------------------------------- Formatting helpers ---------------------------------- */
+
+function formatClock(ts) {
+  return new Date(ts).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+function timeAgo(ts) {
+  const diff = Date.now() - ts;
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.floor(hr / 24)}d ago`;
+}
+
+/* ---------------------------------- Static config ---------------------------------- */
+
+const DEMO_ACCOUNTS = [
+  { role: "admin", name: "Meera Iyer", title: "Hostel Administrator", email: "admin@flowfix.demo" },
+  { role: "maintenance", name: "Ravi Kumar", title: "Maintenance Staff", email: "maintenance@flowfix.demo" },
+  { role: "student", name: "Aditya Sharma", title: "Hostel Student · Block B", email: "student@flowfix.demo" },
+];
+
+const NAV = {
+  admin: [
+    { key: "dashboard", label: "Dashboard", icon: "layout-dashboard" },
+    { key: "monitoring", label: "Live Monitoring", icon: "activity" },
+    { key: "alerts", label: "Leakage Alerts", icon: "alert-triangle" },
+    { key: "maintenance", label: "Maintenance", icon: "wrench" },
+    { key: "map", label: "Hostel Map", icon: "map-pin" },
+    { key: "analytics", label: "Analytics", icon: "bar-chart" },
+    { key: "reports", label: "Reports", icon: "file-text" },
+    { key: "users", label: "Users", icon: "users" },
+    { key: "settings", label: "Settings", icon: "settings" },
+  ],
+  maintenance: [
+    { key: "dashboard", label: "Dashboard", icon: "layout-dashboard" },
+    { key: "alerts", label: "Leakage Alerts", icon: "alert-triangle" },
+    { key: "maintenance", label: "Maintenance", icon: "wrench" },
+    { key: "map", label: "Hostel Map", icon: "map-pin" },
+    { key: "settings", label: "Settings", icon: "settings" },
+  ],
+  student: [
+    { key: "report", label: "Report an Issue", icon: "send" },
+    { key: "map", label: "Hostel Map", icon: "map-pin" },
+    { key: "settings", label: "Settings", icon: "settings" },
+  ],
+};
+
+const FIXTURE_STATUS_TONE = { Normal: "success", Watch: "warning", "Leakage Suspected": "orange", Critical: "danger" };
+const SEVERITY_TONE = { Low: "info", Medium: "warning", High: "orange", Critical: "danger" };
+const SEVERITY_BAR = { Low: C.blue, Medium: C.amber, High: C.orange, Critical: C.red };
+const ALERT_STATUS_TONE = { Reported: "danger", "Under Review": "warning", Assigned: "info", "In Progress": "orange", Resolved: "success" };
+
+const PRIORITY_INFO = {
+  Low: "Minor issue — no urgency.",
+  Medium: "Needs routine attention.",
+  High: "Significant leakage or inconvenience.",
+  Critical: "Immediate maintenance attention required.",
+};
+
+const SENSOR_ALERT_STEPS = ["Detected", "Alert Generated", "Maintenance Notified", "Staff Assigned", "Repair In Progress", "Resolved"];
+const STUDENT_ALERT_STEPS = ["Reported", "Management Notified", "Under Review", "Staff Assigned", "Repair In Progress", "Resolved"];
+function alertStepsFor(source) {
+  return source === "Student Report" ? STUDENT_ALERT_STEPS : SENSOR_ALERT_STEPS;
+}
+const STATUS_STEP_INDEX = { Reported: 1, "Under Review": 2, Assigned: 3, "In Progress": 4, Resolved: 5 };
+
+const AUDIT_LINES = {
+  Detected: () => "Leakage detected by sensor",
+  "Alert Generated": () => "Alert generated",
+  "Maintenance Notified": () => "Maintenance team notified",
+  Reported: () => "Student submitted the report",
+  "Management Notified": () => "Hostel management notified",
+  "Under Review": (inc) => (inc.source === "Student Report" ? "Management acknowledged — under review" : "Acknowledged by management"),
+  "Staff Assigned": (inc) => `Assigned to ${inc.assignedTo || "maintenance staff"}`,
+  "Repair In Progress": () => "Repair started",
+  Resolved: () => "Issue marked resolved",
+};
+function auditLine(step, inc) {
+  const fn = AUDIT_LINES[step];
+  return fn ? fn(inc) : step;
+}
+function responseTimeLabel(inc) {
+  const assignedEvt = inc.timeline.find((t) => t.step === "Staff Assigned");
+  if (!assignedEvt) return "Pending assignment";
+  const mins = Math.max(0, Math.round((assignedEvt.at - inc.detectedAt) / 60000));
+  return `${mins} min`;
+}
+function repairDurationLabel(inc) {
+  const resolvedEvt = inc.timeline.find((t) => t.step === "Resolved");
+  if (!resolvedEvt) return null;
+  const mins = Math.max(1, Math.round((resolvedEvt.at - inc.detectedAt) / 60000));
+  if (mins < 60) return `${mins} min`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+}
+
+const DEMO_SCENARIO_STEPS = [
+  "Student submits a report",
+  "Hostel management notified",
+  "Management reviews the report",
+  "Ravi Kumar assigned",
+  "Maintenance sees the job",
+  "Repair marked in progress",
+  "Issue marked resolved",
+  "Dashboard & analytics update",
+  "Student sees it resolved",
+];
+
+const PROBLEM_TYPES = ["Leaking Tap", "Leaking Hand Spray", "Continuous Water Flow", "Pipe Leakage", "Damaged Fixture", "Other"];
+const FIXTURE_OPTIONS = ["Tap", "Hand Spray", "Toilet", "Pipe", "Wash Basin"];
+const URGENCY_OPTIONS = ["Low", "Medium", "High", "Critical"];
+
+/* ============================================================================================
+   ICON SYSTEM (hand-drawn minimal line icons — no external icon library required)
+============================================================================================ */
+
+function Icon({ name, className, style, size }) {
+  const common = {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    className,
+    style: size ? { width: size, height: size, ...style } : style,
+  };
+  switch (name) {
+    case "droplet":
+      return <svg {...common}><path d="M12 2.5c4 5 7 8.7 7 12.7A7 7 0 0 1 5 15.2C5 11.2 8 7.5 12 2.5Z" /></svg>;
+    case "droplets":
+      return (
+        <svg {...common}>
+          <path d="M8.5 3c2.4 2.9 4 4.9 4 7.2a4 4 0 0 1-8 0C4.5 7.9 6.1 5.9 8.5 3Z" />
+          <path d="M15.8 9c2.5 3 4.2 5.1 4.2 7.4a4.2 4.2 0 0 1-8.4 0" />
+        </svg>
+      );
+    case "waves":
+      return (
+        <svg {...common}>
+          <path d="M2 7.5c1.5-1.3 3-1.3 4.5 0s3 1.3 4.5 0 3-1.3 4.5 0 3 1.3 4.5 0" />
+          <path d="M2 13.5c1.5-1.3 3-1.3 4.5 0s3 1.3 4.5 0 3-1.3 4.5 0 3 1.3 4.5 0" />
+          <path d="M2 19.5c1.5-1.3 3-1.3 4.5 0s3 1.3 4.5 0 3-1.3 4.5 0 3 1.3 4.5 0" />
+        </svg>
+      );
+    case "alert-triangle":
+      return (
+        <svg {...common}>
+          <path d="M12 3.2 22 20H2Z" />
+          <line x1="12" y1="9.5" x2="12" y2="14" />
+          <line x1="12" y1="17" x2="12" y2="17.01" />
+        </svg>
+      );
+    case "alert-octagon":
+      return (
+        <svg {...common}>
+          <polygon points="7.3,2.5 16.7,2.5 21.5,7.3 21.5,16.7 16.7,21.5 7.3,21.5 2.5,16.7 2.5,7.3" />
+          <line x1="12" y1="8" x2="12" y2="13" />
+          <line x1="12" y1="16" x2="12" y2="16.01" />
+        </svg>
+      );
+    case "check-circle":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M8 12.3 10.8 15 16 9" />
+        </svg>
+      );
+    case "clock":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5.3l3.3 2" />
+        </svg>
+      );
+    case "map-pin":
+      return (
+        <svg {...common}>
+          <path d="M12 21.5S5.5 14.3 5.5 9.3a6.5 6.5 0 0 1 13 0c0 5-6.5 12.2-6.5 12.2Z" />
+          <circle cx="12" cy="9.3" r="2.3" />
+        </svg>
+      );
+    case "wrench":
+      return (
+        <svg {...common}>
+          <path d="M14.5 6.5a3.7 3.7 0 0 1-4.9 5L4.5 16.6l2.9 2.9 5.1-5.1a3.7 3.7 0 0 1 5-4.9l-2.8 2.8-2-2Z" />
+        </svg>
+      );
+    case "users":
+      return (
+        <svg {...common}>
+          <circle cx="9" cy="8" r="3.2" />
+          <path d="M3.2 20c0-3.3 2.6-6 5.8-6s5.8 2.7 5.8 6" />
+          <circle cx="17" cy="9.2" r="2.6" />
+          <path d="M15.3 14.3c2.6.3 4.7 2.5 4.7 5.2" />
+        </svg>
+      );
+    case "bar-chart":
+      return (
+        <svg {...common}>
+          <line x1="5" y1="20" x2="5" y2="11" />
+          <line x1="12" y1="20" x2="12" y2="5" />
+          <line x1="19" y1="20" x2="19" y2="14" />
+        </svg>
+      );
+    case "bell":
+      return (
+        <svg {...common}>
+          <path d="M6.5 16.5v-5.3a5.5 5.5 0 0 1 11 0v5.3l1.7 2.3H4.8Z" />
+          <path d="M10.2 21a1.9 1.9 0 0 0 3.6 0" />
+        </svg>
+      );
+    case "log-out":
+      return (
+        <svg {...common}>
+          <path d="M9.5 20.5h-4a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2h4" />
+          <path d="M15 16.5l4.5-4.5-4.5-4.5" />
+          <line x1="19.5" y1="12" x2="8.5" y2="12" />
+        </svg>
+      );
+    case "activity":
+      return <svg {...common}><polyline points="2,13.5 6.8,13.5 9,20 15,4 17.2,13.5 22,13.5" /></svg>;
+    case "clipboard-list":
+      return (
+        <svg {...common}>
+          <rect x="5.5" y="3.5" width="13" height="17.5" rx="1.5" />
+          <rect x="9" y="1.8" width="6" height="3" rx="1" />
+          <line x1="8.5" y1="10.5" x2="15.5" y2="10.5" />
+          <line x1="8.5" y1="14.5" x2="15.5" y2="14.5" />
+          <line x1="8.5" y1="18.5" x2="13" y2="18.5" />
+        </svg>
+      );
+    case "settings":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="3.2" />
+          <path d="M19.4 13.4a7.4 7.4 0 0 0 0-2.8l2-1.6-2-3.4-2.4 1a7.3 7.3 0 0 0-2.4-1.4L14.2 2.5H9.8l-.4 2.7a7.3 7.3 0 0 0-2.4 1.4l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.8l-2 1.6 2 3.4 2.4-1a7.3 7.3 0 0 0 2.4 1.4l.4 2.7h4.4l.4-2.7a7.3 7.3 0 0 0 2.4-1.4l2.4 1 2-3.4Z" />
+        </svg>
+      );
+    case "menu":
+      return (
+        <svg {...common}>
+          <line x1="3.5" y1="6.5" x2="20.5" y2="6.5" />
+          <line x1="3.5" y1="12" x2="20.5" y2="12" />
+          <line x1="3.5" y1="17.5" x2="20.5" y2="17.5" />
+        </svg>
+      );
+    case "x":
+      return (
+        <svg {...common}>
+          <line x1="5.5" y1="5.5" x2="18.5" y2="18.5" />
+          <line x1="18.5" y1="5.5" x2="5.5" y2="18.5" />
+        </svg>
+      );
+    case "chevron-right":
+      return <svg {...common}><polyline points="9,5 16,12 9,19" /></svg>;
+    case "chevron-left":
+      return <svg {...common}><polyline points="15,5 8,12 15,19" /></svg>;
+    case "play":
+      return <svg {...common}><polygon points="6.5,4.5 19.5,12 6.5,19.5" /></svg>;
+    case "square":
+      return <svg {...common}><rect x="5" y="5" width="14" height="14" rx="1.5" /></svg>;
+    case "rotate-ccw":
+      return (
+        <svg {...common}>
+          <path d="M3.5 9a8.5 8.5 0 1 1 -1.3 6.2" />
+          <polyline points="1.2,4.2 2.2,9.3 7.3,8.3" />
+        </svg>
+      );
+    case "download":
+      return (
+        <svg {...common}>
+          <path d="M12 3v12.5" />
+          <polyline points="6.5,11 12,16.5 17.5,11" />
+          <line x1="4.5" y1="21" x2="19.5" y2="21" />
+        </svg>
+      );
+    case "layout-dashboard":
+      return (
+        <svg {...common}>
+          <rect x="3" y="3" width="8" height="8" rx="1.2" />
+          <rect x="13" y="3" width="8" height="5" rx="1.2" />
+          <rect x="13" y="10" width="8" height="11" rx="1.2" />
+          <rect x="3" y="13" width="8" height="8" rx="1.2" />
+        </svg>
+      );
+    case "file-text":
+      return (
+        <svg {...common}>
+          <path d="M7 2.5h6.5l4 4v15H7Z" />
+          <line x1="9.8" y1="10.5" x2="14.7" y2="10.5" />
+          <line x1="9.8" y1="14.2" x2="14.7" y2="14.2" />
+          <line x1="9.8" y1="17.9" x2="13" y2="17.9" />
+        </svg>
+      );
+    case "send":
+      return <svg {...common}><polygon points="21,3 3.5,10 10.8,13.2 14,20.5" /><line x1="21" y1="3" x2="10.8" y2="13.2" /></svg>;
+    case "check":
+      return <svg {...common}><polyline points="4,12.5 9,17.5 20,5.5" /></svg>;
+    case "info":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <line x1="12" y1="11" x2="12" y2="16.3" />
+          <line x1="12" y1="7.6" x2="12" y2="7.61" />
+        </svg>
+      );
+    case "shield-check":
+      return (
+        <svg {...common}>
+          <path d="M12 2.7 19 5.5v6c0 5.2-3.2 8-7 9.3-3.8-1.3-7-4.1-7-9.3v-6Z" />
+          <polyline points="8.7,12 10.9,14.2 15.3,9.8" />
+        </svg>
+      );
+    case "zap":
+      return <svg {...common}><polygon points="13,2 4,14 11,14 10,22 20,9 13,9" /></svg>;
+    case "arrow-right":
+      return <svg {...common}><line x1="4" y1="12" x2="19.5" y2="12" /><polyline points="13,5.5 19.5,12 13,18.5" /></svg>;
+    case "loader":
+      return (
+        <svg {...common}>
+          <line x1="12" y1="2.5" x2="12" y2="6.2" />
+          <line x1="12" y1="17.8" x2="12" y2="21.5" />
+          <line x1="5.1" y1="5.1" x2="7.6" y2="7.6" />
+          <line x1="16.4" y1="16.4" x2="18.9" y2="18.9" />
+          <line x1="2.5" y1="12" x2="6.2" y2="12" />
+          <line x1="17.8" y1="12" x2="21.5" y2="12" />
+          <line x1="5.1" y1="18.9" x2="7.6" y2="16.4" />
+          <line x1="16.4" y1="7.6" x2="18.9" y2="5.1" />
+        </svg>
+      );
+    default:
+      return <svg {...common}><circle cx="12" cy="12" r="9" /></svg>;
+  }
+}
+
+/* ============================================================================================
+   CHART PRIMITIVES (hand-drawn inline SVG — no external charting library required)
+============================================================================================ */
+
+function TrendChart({ data, height = 220, filled = true, color = C.teal }) {
+  const W = 600, H = height, padL = 38, padR = 12, padT = 12, padB = 24;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const maxVal = Math.max.apply(null, data.map((d) => d.loss).concat([1]));
+  const n = data.length;
+  const xAt = (i) => padL + (n <= 1 ? 0 : (i / (n - 1)) * plotW);
+  const yAt = (v) => padT + plotH - (v / maxVal) * plotH;
+  const points = data.map((d, i) => `${xAt(i)},${yAt(d.loss)}`).join(" ");
+  const areaPoints = `${xAt(0)},${padT + plotH} ${points} ${xAt(Math.max(n - 1, 0))},${padT + plotH}`;
+  const gridSteps = [0, 0.25, 0.5, 0.75, 1];
+  const labelEvery = Math.max(1, Math.ceil(n / 7));
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
+      {gridSteps.map((g, gi) => {
+        const gy = padT + plotH - g * plotH;
+        return (
+          <g key={gi}>
+            <line x1={padL} y1={gy} x2={W - padR} y2={gy} stroke={C.border} strokeWidth="1" />
+            <text x={padL - 6} y={gy + 3} textAnchor="end" fontSize="9" fill={C.inkFaint}>{Math.round(g * maxVal)}</text>
+          </g>
+        );
+      })}
+      {filled && <polygon points={areaPoints} fill={color} opacity="0.15" />}
+      {n > 0 && <polyline points={points} fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />}
+      {data.map((d, i) => (i % labelEvery === 0 || i === n - 1) && (
+        <text key={i} x={xAt(i)} y={H - 5} textAnchor="middle" fontSize="9" fill={C.inkFaint}>{d.day}</text>
+      ))}
+    </svg>
+  );
+}
+
+function BarChartV({ data, labelKey, valueKey, color = C.blue, height = 200 }) {
+  const W = 420, H = height, padL = 26, padR = 10, padT = 14, padB = 24;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const maxVal = Math.max.apply(null, data.map((d) => d[valueKey]).concat([1]));
+  const n = data.length || 1;
+  const slot = plotW / n;
+  const bw = slot * 0.5;
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
+      <line x1={padL} y1={padT + plotH} x2={W - padR} y2={padT + plotH} stroke={C.border} />
+      {data.map((d, i) => {
+        const cx = padL + slot * i + slot / 2;
+        const barH = maxVal ? (d[valueKey] / maxVal) * plotH : 0;
+        return (
+          <g key={i}>
+            <rect x={cx - bw / 2} y={padT + plotH - barH} width={bw} height={Math.max(barH, 1)} rx="3" fill={color} />
+            <text x={cx} y={H - 6} textAnchor="middle" fontSize="10" fill={C.inkFaint}>{d[labelKey]}</text>
+            <text x={cx} y={padT + plotH - barH - 5} textAnchor="middle" fontSize="10" fill={C.ink}>{d[valueKey]}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function BarChartH({ data, labelKey, valueKey, color = C.teal, height = 200 }) {
+  const W = 420, H = height, padL = 84, padR = 28, padT = 8, padB = 8;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const maxVal = Math.max.apply(null, data.map((d) => d[valueKey]).concat([1]));
+  const n = data.length || 1;
+  const slot = plotH / n;
+  const bh = slot * 0.5;
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
+      <line x1={padL} y1={padT} x2={padL} y2={padT + plotH} stroke={C.border} />
+      {data.map((d, i) => {
+        const cy = padT + slot * i + slot / 2;
+        const barW = maxVal ? (d[valueKey] / maxVal) * plotW : 0;
+        return (
+          <g key={i}>
+            <text x={padL - 8} y={cy + 3.5} textAnchor="end" fontSize="10" fill={C.inkSoft}>{d[labelKey]}</text>
+            <rect x={padL} y={cy - bh / 2} width={Math.max(barW, 1)} height={bh} rx="3" fill={color} />
+            <text x={padL + barW + 6} y={cy + 3.5} fontSize="10" fill={C.ink}>{d[valueKey]}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function DonutChart({ resolved, open, size = 170 }) {
+  const total = resolved + open || 1;
+  const r = 58, cx = size / 2, cy = size / 2, circumference = 2 * Math.PI * r;
+  const resolvedLen = (resolved / total) * circumference;
+  const pct = total ? Math.round((resolved / total) * 100) : 0;
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto">
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke={C.redSoft} strokeWidth="18" />
+      <circle
+        cx={cx} cy={cy} r={r} fill="none" stroke={C.green} strokeWidth="18"
+        strokeDasharray={`${resolvedLen} ${circumference - resolvedLen}`}
+        strokeDashoffset={circumference * 0.25}
+        transform={`rotate(-90 ${cx} ${cy})`}
+        strokeLinecap="round"
+      />
+      <text x={cx} y={cy - 2} textAnchor="middle" fontSize="22" fontWeight="600" fill={C.ink}>{pct}%</text>
+      <text x={cx} y={cy + 17} textAnchor="middle" fontSize="10" fill={C.inkFaint}>resolved</text>
+    </svg>
+  );
+}
+
+/* ============================================================================================
+   SMALL UI ATOMS
+============================================================================================ */
+
+function FlowFixMark({ size = 32 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 40 40" fill="none">
+      <path d="M20 4C20 4 8 17.5 8 25a12 12 0 0 0 24 0C32 17.5 20 4 20 4Z" fill={C.teal} />
+      <path d="M13 26a7 7 0 0 0 7 6" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" fill="none" opacity="0.85" />
+    </svg>
+  );
+}
+
+function Badge({ label, tone = "neutral", dot = false }) {
+  const map = {
+    neutral: { bg: C.tealSoft, fg: C.tealDark },
+    info: { bg: C.blueSoft, fg: C.blue },
+    warning: { bg: C.amberSoft, fg: C.amber },
+    danger: { bg: C.redSoft, fg: C.red },
+    success: { bg: C.greenSoft, fg: C.green },
+    orange: { bg: C.orangeSoft, fg: C.orange },
+  };
+  const t = map[tone] || map.neutral;
+  return (
+    <span style={{ background: t.bg, color: t.fg }} className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold whitespace-nowrap">
+      {dot && <span style={{ background: t.fg }} className="h-1.5 w-1.5 rounded-full" />}
+      {label}
+    </span>
+  );
+}
+
+function KpiCard({ icon, label, value, sub, tone = "teal" }) {
+  const barColor = { teal: C.teal, red: C.red, orange: C.orange, blue: C.blue, green: C.green, amber: C.amber }[tone] || C.teal;
+  return (
+    <div className="rounded-md bg-white p-4 flex flex-col gap-2" style={{ border: `1px solid ${C.border}`, borderLeft: `4px solid ${barColor}` }}>
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium" style={{ color: C.inkSoft }}>{label}</span>
+        <Icon name={icon} className="h-4 w-4" style={{ color: barColor }} />
+      </div>
+      <div className="text-2xl font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>{value}</div>
+      {sub && <div className="text-xs" style={{ color: C.inkFaint }}>{sub}</div>}
+    </div>
+  );
+}
+
+function SectionHeader({ title, subtitle, action }) {
+  return (
+    <div className="flex flex-wrap items-end justify-between gap-3 mb-5">
+      <div>
+        <h1 className="text-xl font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>{title}</h1>
+        {subtitle && <p className="text-sm mt-1" style={{ color: C.inkSoft }}>{subtitle}</p>}
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function EmptyState({ icon, title, message }) {
+  return (
+    <div className="flex flex-col items-center justify-center text-center py-14 px-6 rounded-md" style={{ border: `1px dashed ${C.borderStrong}`, background: C.surface }}>
+      <Icon name={icon} className="h-8 w-8 mb-3" style={{ color: C.inkFaint }} />
+      <div className="font-medium" style={{ color: C.ink }}>{title}</div>
+      {message && <div className="text-sm mt-1" style={{ color: C.inkSoft, maxWidth: "22rem" }}>{message}</div>}
+    </div>
+  );
+}
+
+function Stat({ label, value }) {
+  return (
+    <div>
+      <div className="text-xs" style={{ color: C.inkFaint }}>{label}</div>
+      <div className="text-sm font-semibold mt-0.5" style={{ color: C.ink }}>{value}</div>
+    </div>
+  );
+}
+
+function ActionButton({ onClick, icon, label, tone = "teal" }) {
+  const bg = { teal: C.teal, green: C.green }[tone] || C.teal;
+  return (
+    <button onClick={onClick} className="inline-flex items-center gap-1.5 rounded-md px-3.5 py-2 text-sm font-medium text-white" style={{ background: bg }}>
+      <Icon name={icon} className="h-3.5 w-3.5" /> {label}
+    </button>
+  );
+}
+
+function Field({ label, error, children }) {
+  return (
+    <div>
+      <label className="text-xs font-medium block mb-1" style={{ color: C.inkSoft }}>{label}</label>
+      {children}
+      {error && <div className="text-xs mt-1" style={{ color: C.red }}>{error}</div>}
+    </div>
+  );
+}
+
+function LiveDot({ color = C.green }) {
+  return (
+    <span className="relative inline-flex h-2 w-2 flex-shrink-0">
+      <span className="ff-live-dot absolute inline-flex h-full w-full rounded-full" style={{ background: color }} />
+      <span className="relative inline-flex rounded-full h-2 w-2" style={{ background: color }} />
+    </span>
+  );
+}
+
+function Modal({ title, onClose, children, width = "26rem" }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(14,42,50,0.45)" }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="w-full rounded-lg bg-white p-5" style={{ maxWidth: width, border: `1px solid ${C.border}` }}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>{title}</h3>
+          <button onClick={onClose} className="rounded p-1 hover:bg-gray-100">
+            <Icon name="x" className="h-4 w-4" style={{ color: C.inkSoft }} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ToastStack({ toasts, onDismiss }) {
+  const ICONS = { info: "info", success: "check-circle", warning: "alert-triangle", critical: "alert-octagon" };
+  const COLORS = { info: C.blue, success: C.green, warning: C.amber, critical: C.red };
+  return (
+    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2" style={{ maxWidth: "22rem", width: "calc(100% - 2rem)" }}>
+      {toasts.map((t) => {
+        const iconName = ICONS[t.type] || "info";
+        const color = COLORS[t.type] || C.blue;
+        return (
+          <div key={t.id} className="rounded-md p-3 flex gap-2.5 items-start bg-white shadow-lg" style={{ border: `1px solid ${C.border}`, borderLeft: `4px solid ${color}`, animation: "ff-slide-in .25s ease-out" }}>
+            <Icon name={iconName} className="h-4 w-4 mt-0.5 flex-shrink-0" style={{ color }} />
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium" style={{ color: C.ink }}>{t.title}</div>
+              {t.message && <div className="text-xs mt-0.5" style={{ color: C.inkSoft }}>{t.message}</div>}
+            </div>
+            <button onClick={() => onDismiss(t.id)} className="flex-shrink-0">
+              <Icon name="x" className="h-3.5 w-3.5" style={{ color: C.inkFaint }} />
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function AlertTimeline({ status, source }) {
+  const doneIdx = STATUS_STEP_INDEX[status] || 0;
+  const steps = alertStepsFor(source);
+  return (
+    <div className="flex flex-col">
+      {steps.map((step, idx) => {
+        const done = idx <= doneIdx;
+        const current = idx === doneIdx && status !== "Resolved";
+        const isLast = idx === steps.length - 1;
+        return (
+          <div key={step} className="flex gap-3">
+            <div className="flex flex-col items-center">
+              <div className="h-6 w-6 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: done ? C.teal : "#fff", border: `2px solid ${done ? C.teal : C.borderStrong}` }}>
+                {done && <Icon name="check" className="h-3.5 w-3.5" style={{ color: "#fff" }} />}
+              </div>
+              {!isLast && <div className="w-0.5 flex-1" style={{ background: idx < doneIdx ? C.teal : C.border, minHeight: "1.75rem" }} />}
+            </div>
+            <div className="pb-6">
+              <div className="text-sm font-medium" style={{ color: done ? C.ink : C.inkFaint }}>{step}</div>
+              {current && <div className="text-xs mt-0.5" style={{ color: C.teal }}>In progress</div>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DemoStepper({ step }) {
+  return (
+    <div className="mb-5 rounded-md p-4" style={{ background: C.tealSoft, border: "1px solid #BFE3DE" }}>
+      <div className="flex items-center gap-2 mb-3">
+        <Icon name="loader" className="h-4 w-4 animate-spin" style={{ color: C.teal }} />
+        <span className="text-sm font-semibold" style={{ color: C.tealDark }}>Faculty Demo Scenario running…</span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {DEMO_SCENARIO_STEPS.map((label, i) => (
+          <span
+            key={i}
+            className="text-xs rounded-full px-2.5 py-1"
+            style={{
+              background: i < step ? C.teal : i === step ? "#fff" : "transparent",
+              color: i < step ? "#fff" : i === step ? C.teal : C.inkFaint,
+              border: `1px solid ${i <= step ? C.teal : C.border}`,
+              fontWeight: i === step ? 600 : 500,
+            }}
+          >
+            {label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================================
+   SIDEBAR / HEADER / NOTIFICATIONS
+============================================================================================ */
+
+function Sidebar({ role, view, onNavigate, open, onClose }) {
+  const items = NAV[role] || [];
+  return (
+    <>
+      {open && <div className="fixed inset-0 z-30 md:hidden" style={{ background: "rgba(14,42,50,0.4)" }} onClick={onClose} />}
+      <aside
+        className={`fixed md:sticky inset-y-0 md:inset-auto left-0 md:left-auto top-0 z-40 md:z-0 h-screen w-64 flex-shrink-0 flex flex-col transition-transform duration-200 ${
+          open ? "translate-x-0" : "-translate-x-full md:translate-x-0"
+        }`}
+        style={{ background: C.surface, borderRight: `1px solid ${C.border}` }}
+      >
+        <div className="flex items-center gap-2 px-5 py-5">
+          <FlowFixMark size={28} />
+          <span className="font-semibold text-lg" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>FlowFix</span>
+        </div>
+        <nav className="flex-1 px-3 space-y-1 overflow-y-auto pb-4">
+          {items.map((item) => {
+            const active = view === item.key || (view === "alertDetail" && (item.key === "alerts" || item.key === "maintenance"));
+            return (
+              <button
+                key={item.key}
+                onClick={() => onNavigate(item.key)}
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium"
+                style={{ background: active ? C.tealSoft : "transparent", color: active ? C.tealDark : C.inkSoft, borderLeft: active ? `3px solid ${C.teal}` : "3px solid transparent" }}
+              >
+                <Icon name={item.icon} className="h-4 w-4 flex-shrink-0" />
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+        <div className="px-4 py-4 text-xs" style={{ borderTop: `1px solid ${C.border}`, color: C.inkFaint }}>
+          Prototype build · sensor data simulated
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function NotificationsPanel({ notifications, onMarkRead, onMarkAllRead, onView }) {
+  return (
+    <div className="absolute right-0 mt-2 w-80 overflow-y-auto rounded-md bg-white shadow-xl z-50" style={{ border: `1px solid ${C.border}`, maxHeight: "26rem" }}>
+      <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: `1px solid ${C.border}` }}>
+        <span className="text-sm font-semibold" style={{ color: C.ink }}>Notifications</span>
+        <button onClick={onMarkAllRead} className="text-xs font-medium" style={{ color: C.teal }}>Mark all read</button>
+      </div>
+      {notifications.length === 0 ? (
+        <div className="px-4 py-8 text-center text-sm" style={{ color: C.inkFaint }}>No notifications yet.</div>
+      ) : (
+        <div>
+          {notifications.slice(0, 15).map((n) => (
+            <div key={n.id} className="flex items-start gap-2 px-4 py-3" style={{ borderBottom: `1px solid ${C.border}`, background: n.read ? "transparent" : C.tealSoft }}>
+              <button onClick={() => onMarkRead(n.id)} className="flex gap-2.5 text-left flex-1 min-w-0">
+                <span className="h-1.5 w-1.5 rounded-full mt-1.5 flex-shrink-0" style={{ background: n.read ? "transparent" : C.teal }} />
+                <div className="min-w-0">
+                  <div className="text-xs font-medium" style={{ color: C.ink }}>{n.title}</div>
+                  <div className="text-xs mt-0.5" style={{ color: C.inkSoft }}>{n.message}</div>
+                  <div className="mt-1" style={{ color: C.inkFaint, fontSize: "11px" }}>{timeAgo(n.createdAt)}</div>
+                </div>
+              </button>
+              {n.incidentId && (
+                <button onClick={() => onView(n.incidentId)} className="text-xs font-medium flex-shrink-0 mt-0.5" style={{ color: C.teal }}>View</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Header({ user, onToggleSidebar, notifOpen, setNotifOpen, notifications, onMarkRead, onMarkAllRead, onViewNotification, onLogout, pageTitle }) {
+  const unread = notifications.filter((n) => !n.read).length;
+  return (
+    <header className="sticky top-0 z-20 flex items-center justify-between gap-3 px-4 md:px-6 py-3" style={{ background: C.surface, borderBottom: `1px solid ${C.border}` }}>
+      <div className="flex items-center gap-3 min-w-0">
+        <button onClick={onToggleSidebar} className="md:hidden p-1.5 rounded hover:bg-gray-100">
+          <Icon name="menu" className="h-5 w-5" style={{ color: C.ink }} />
+        </button>
+        <div className="text-sm font-semibold truncate" style={{ color: C.ink }}>{pageTitle}</div>
+      </div>
+      <div className="flex items-center gap-2 md:gap-3 flex-shrink-0">
+        <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium" style={{ background: C.tealSoft, color: C.tealDark }}>
+          <Icon name="shield-check" className="h-3 w-3" /> Demo Mode
+        </span>
+        <div className="relative">
+          <button onClick={() => setNotifOpen((o) => !o)} className="relative p-2 rounded-md hover:bg-gray-100">
+            <Icon name="bell" className="h-4 w-4" style={{ color: C.ink }} />
+            {unread > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 h-4 w-4 rounded-full flex items-center justify-center font-semibold text-white" style={{ background: C.red, fontSize: "10px" }}>
+                {unread}
+              </span>
+            )}
+          </button>
+          {notifOpen && <NotificationsPanel notifications={notifications} onMarkRead={onMarkRead} onMarkAllRead={onMarkAllRead} onView={onViewNotification} />}
+        </div>
+        <div className="flex items-center gap-2 pl-2 md:pl-3" style={{ borderLeft: `1px solid ${C.border}` }}>
+          <div className="h-8 w-8 rounded-full flex items-center justify-center text-xs font-semibold text-white flex-shrink-0" style={{ background: C.teal }}>
+            {user.name.split(" ").map((p) => p[0]).slice(0, 2).join("")}
+          </div>
+          <div className="hidden md:block leading-tight">
+            <div className="text-xs font-medium" style={{ color: C.ink }}>{user.name}</div>
+            <div style={{ color: C.inkFaint, fontSize: "11px" }}>{user.title}</div>
+          </div>
+          <button onClick={onLogout} title="Log out" className="p-2 rounded-md hover:bg-gray-100">
+            <Icon name="log-out" className="h-4 w-4" style={{ color: C.inkSoft }} />
+          </button>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+/* ============================================================================================
+   LOGIN
+============================================================================================ */
+
+function LoginPage({ onLogin }) {
+  const roles = [
+    { role: "student", icon: "send", title: "Hostel Student", email: "student@flowfix.demo", desc: "Report and track water issues." },
+    { role: "admin", icon: "layout-dashboard", title: "Hostel Administrator", email: "admin@flowfix.demo", desc: "Review incidents and coordinate maintenance." },
+    { role: "maintenance", icon: "wrench", title: "Maintenance Staff", email: "maintenance@flowfix.demo", desc: "Handle assigned repairs and record resolutions." },
+  ];
+  return (
+    <div className="min-h-screen flex" style={{ background: C.bg, fontFamily: "'Inter', sans-serif" }}>
+      <div className="hidden lg:flex lg:w-5/12 flex-col justify-between p-10 text-white" style={{ background: `linear-gradient(160deg, ${C.navyGrad1}, ${C.navyGrad2})` }}>
+        <div>
+          <div className="flex items-center gap-2.5">
+            <FlowFixMark size={34} />
+            <span className="text-2xl font-semibold" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>FlowFix</span>
+          </div>
+          <p className="mt-2 text-sm" style={{ color: "#B9DEDA" }}>Detect. Respond. Save Water.</p>
+        </div>
+        <div>
+          <div className="ff-flowline h-px w-24 mb-8" />
+          <h2 className="text-3xl leading-snug font-semibold" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+            Smart water management
+            <br />
+            for university hostels.
+          </h2>
+          <div className="mt-8 space-y-4">
+            {[
+              "Catch a leaking tap or spray within minutes, not weeks.",
+              "Route every alert to the right maintenance person, automatically.",
+              "Track litres saved and response times, block by block.",
+            ].map((line, i) => (
+              <div key={i} className="flex items-start gap-3 text-sm" style={{ color: "#DCEFEC" }}>
+                <Icon name="droplet" className="h-4 w-4 mt-0.5 flex-shrink-0" style={{ color: "#5EEAD4" }} />
+                {line}
+              </div>
+            ))}
+          </div>
+        </div>
+        <p className="text-xs" style={{ color: "#7FB3AE" }}>Academic prototype · sensor readings are simulated</p>
+      </div>
+
+      <div className="flex-1 flex items-center justify-center p-6">
+        <div className="w-full" style={{ maxWidth: "30rem" }}>
+          <div className="lg:hidden flex items-center gap-2 mb-8 justify-center">
+            <FlowFixMark size={30} />
+            <span className="text-xl font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>FlowFix</span>
+          </div>
+          <h1 className="text-xl font-semibold text-center" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>Sign in to the demo</h1>
+          <p className="text-sm text-center mt-1.5" style={{ color: C.inkSoft }}>Pick a role to explore FlowFix as that user. No password needed for this prototype.</p>
+
+          <div className="mt-7 space-y-3">
+            {roles.map((r) => {
+              return (
+                <button key={r.role} onClick={() => onLogin(r.role)} className="w-full text-left rounded-lg p-4 flex items-start gap-3.5 bg-white hover:shadow-md" style={{ border: `1px solid ${C.border}` }}>
+                  <div className="h-10 w-10 rounded-md flex items-center justify-center flex-shrink-0" style={{ background: C.tealSoft }}>
+                    <Icon name={r.icon} className="h-5 w-5" style={{ color: C.teal }} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-semibold" style={{ color: C.ink }}>{r.title}</span>
+                      <Icon name="arrow-right" className="h-4 w-4 flex-shrink-0" style={{ color: C.inkFaint }} />
+                    </div>
+                    <div className="text-xs mt-0.5" style={{ color: C.inkSoft }}>{r.desc}</div>
+                    <div className="text-xs mt-1.5 font-medium" style={{ color: C.teal }}>{r.email}</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-xs text-center mt-6" style={{ color: C.inkFaint }}>Demo credentials shown above · any password works in this prototype</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================================
+   DASHBOARD
+============================================================================================ */
+
+function studentNameFromEmail(email) {
+  const known = DEMO_ACCOUNTS.find((a) => a.email === email);
+  if (known) return known.name;
+  const prefix = (email || "").split("@")[0];
+  return prefix.split(".").map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(" ") || "Student";
+}
+
+function DashboardPage({ state, onNavigate, onRunDemo, onReset, demoRunning, demoStep }) {
+  const kpis = useMemo(() => computeKpis(state), [state]);
+  const trend = useMemo(() => buildTrend(state.incidents, 7), [state.incidents]);
+  const recentAlerts = useMemo(() => [...state.incidents].sort((a, b) => b.detectedAt - a.detectedAt).slice(0, 5), [state.incidents]);
+  const newReports = useMemo(
+    () => state.incidents.filter((i) => i.source === "Student Report" && i.status === "Reported").sort((a, b) => b.detectedAt - a.detectedAt),
+    [state.incidents]
+  );
+  const studentCount = state.incidents.filter((i) => i.source === "Student Report").length;
+  const sensorCount = state.incidents.filter((i) => i.source === "Sensor (Simulated)").length;
+
+  return (
+    <div>
+      <SectionHeader
+        title="Water Management Overview"
+        subtitle="Monitor hostel water usage, leakage incidents and maintenance response."
+        action={
+          <div className="flex flex-wrap gap-2">
+            <button onClick={onReset} className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium" style={{ border: `1px solid ${C.border}`, color: C.inkSoft }}>
+              <Icon name="rotate-ccw" className="h-3.5 w-3.5" /> Reset Demo
+            </button>
+            <button onClick={onRunDemo} disabled={demoRunning} className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium text-white disabled:opacity-60" style={{ background: C.teal }}>
+              <Icon name="play" className="h-3.5 w-3.5" /> {demoRunning ? "Running scenario…" : "Start Faculty Demo"}
+            </button>
+          </div>
+        }
+      />
+
+      <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 mb-6">
+        <KpiCard icon="alert-triangle" tone="red" label="Active Leaks" value={kpis.activeLeaks} sub="Live · simulated sensors" />
+        <KpiCard icon="droplets" tone="orange" label="Water Loss Today" value={`${kpis.waterLossToday.toLocaleString()} L`} sub="Estimated" />
+        <KpiCard icon="check-circle" tone="green" label="Resolved" value={kpis.resolvedThisMonth} sub="Last 30 days · demo data" />
+        <KpiCard icon="clock" tone="blue" label="Avg Response Time" value={`${kpis.avgResponseTime} min`} sub="Detection → assignment" />
+        <KpiCard icon="waves" tone="teal" label="Est. Water Saved" value={`${kpis.estimatedWaterSaved.toLocaleString()} L`} sub="Prototype estimate from resolved incidents" />
+        <KpiCard icon="wrench" tone="amber" label="Open Jobs" value={kpis.openJobs} sub="Assigned + in progress" />
+      </div>
+
+      <div className="rounded-md bg-white p-4 mb-6" style={{ border: `1px solid ${C.border}` }}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold" style={{ color: C.ink }}>New Water Reports</h3>
+          <span className="text-xs rounded-full px-2 py-0.5" style={{ background: C.redSoft, color: C.red }}>{newReports.length} waiting</span>
+        </div>
+        {newReports.length === 0 ? (
+          <EmptyState icon="check-circle" title="No new reports" message="All student water reports have been reviewed." />
+        ) : (
+          <div className="space-y-2">
+            {newReports.map((r) => (
+              <div key={r.id} className="rounded-md p-3 flex flex-wrap items-center gap-3" style={{ border: `1px solid ${C.border}`, borderLeft: `4px solid ${SEVERITY_BAR[r.severity]}` }}>
+                <div className="flex-1" style={{ minWidth: "14rem" }}>
+                  <div className="flex items-center gap-2 flex-wrap mb-0.5">
+                    <span style={{ color: C.inkFaint, fontFamily: "monospace", fontSize: "12px" }}>{r.id}</span>
+                    <Badge label={r.severity} tone={SEVERITY_TONE[r.severity]} />
+                    <Badge label={r.status} tone={ALERT_STATUS_TONE[r.status]} />
+                  </div>
+                  <div className="text-sm font-medium" style={{ color: C.ink }}>{studentNameFromEmail(r.reportedBy)} · Block {r.block} · {r.floor} · {r.room}</div>
+                  <div className="text-xs mt-0.5" style={{ color: C.inkSoft }}>{r.problemType || r.description.split(":")[0]} · {r.fixtureType} · {timeAgo(r.detectedAt)}</div>
+                </div>
+                <ActionButton onClick={() => onNavigate("alertDetail", r.id)} icon="chevron-right" label="Review Report" />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+        <div className="rounded-md bg-white p-4" style={{ border: `1px solid ${C.border}` }}>
+          <div className="flex items-center gap-2 mb-3">
+            <span className="h-2 w-2 rounded-full" style={{ background: C.green }} />
+            <h3 className="text-sm font-semibold" style={{ color: C.ink }}>FlowFix System Status — Operational</h3>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <Stat label="Monitoring Points" value={state.fixtures.length} />
+            <Stat label="Active Alerts" value={kpis.activeLeaks} />
+            <Stat label="Maintenance Team" value="Online" />
+          </div>
+          <div className="text-xs mt-3" style={{ color: C.inkFaint }}>Prototype status indicator — reflects current demo data.</div>
+        </div>
+        <div className="rounded-md bg-white p-4" style={{ border: `1px solid ${C.border}` }}>
+          <h3 className="text-sm font-semibold mb-3" style={{ color: C.ink }}>Incident Sources</h3>
+          <div className="grid grid-cols-2 gap-3">
+            <Stat label="Student Reports" value={studentCount} />
+            <Stat label="Sensor Alerts" value={sensorCount} />
+          </div>
+          <div className="text-xs mt-3" style={{ color: C.inkFaint }}>FlowFix supports manual student reporting today, alongside simulated sensor-based detection.</div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <div className="xl:col-span-2 rounded-md bg-white p-4" style={{ border: `1px solid ${C.border}` }}>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold" style={{ color: C.ink }}>Water loss, last 7 days</h3>
+            <span className="text-xs" style={{ color: C.inkFaint }}>Simulated + demo incidents</span>
+          </div>
+          <div style={{ height: 220 }}>
+            <TrendChart data={trend} height={220} filled color={C.teal} />
+          </div>
+        </div>
+
+        <div className="rounded-md bg-white p-4" style={{ border: `1px solid ${C.border}` }}>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold" style={{ color: C.ink }}>Recent alerts</h3>
+            <button onClick={() => onNavigate("alerts")} className="text-xs font-medium" style={{ color: C.teal }}>View all</button>
+          </div>
+          <div className="space-y-2">
+            {recentAlerts.map((a) => (
+              <button key={a.id} onClick={() => onNavigate("alertDetail", a.id)} className="w-full text-left rounded-md p-2.5 flex items-center justify-between gap-2" style={{ border: `1px solid ${C.border}` }}>
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold truncate" style={{ color: C.ink }}>Block {a.block}-{a.room} · {a.fixtureType}</div>
+                  <div className="text-xs mt-0.5" style={{ color: C.inkFaint }}>{timeAgo(a.detectedAt)}</div>
+                </div>
+                <Badge label={a.status} tone={ALERT_STATUS_TONE[a.status]} />
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================================
+   LIVE MONITORING
+============================================================================================ */
+
+function LiveMonitoringPage({ state, dispatch, simRunning, onToggleSim }) {
+  const [blockFilter, setBlockFilter] = useState("All");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [search, setSearch] = useState("");
+  const statusOptions = ["All", "Normal", "Watch", "Leakage Suspected", "Critical"];
+  const fixtures = useMemo(() => {
+    let list = state.fixtures.filter((f) => blockFilter === "All" || f.block === blockFilter);
+    if (statusFilter !== "All") list = list.filter((f) => f.status === statusFilter);
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter((f) => f.block.toLowerCase().includes(q) || f.room.toLowerCase().includes(q) || f.sensorId.toLowerCase().includes(q));
+    }
+    return list;
+  }, [state.fixtures, blockFilter, statusFilter, search]);
+
+  return (
+    <div>
+      <SectionHeader
+        title="Live Monitoring"
+        subtitle="Prototype sensor simulation — sensor values shown here are simulated for demonstration."
+        action={
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => dispatch({ type: "SIMULATE_LEAKAGE" })} className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium text-white" style={{ background: C.red }}>
+              <Icon name="zap" className="h-3.5 w-3.5" /> Simulate Leakage
+            </button>
+            <button onClick={onToggleSim} className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium" style={{ border: `1px solid ${C.border}`, color: simRunning ? C.red : C.inkSoft }}>
+              {simRunning ? (<><Icon name="square" className="h-3.5 w-3.5" /> Stop Simulation</>) : (<><Icon name="play" className="h-3.5 w-3.5" /> Start Simulation</>)}
+            </button>
+            <button onClick={() => dispatch({ type: "RESET_DEMO" })} className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium" style={{ border: `1px solid ${C.border}`, color: C.inkSoft }}>
+              <Icon name="rotate-ccw" className="h-3.5 w-3.5" /> Reset Demo Data
+            </button>
+          </div>
+        }
+      />
+
+      <div className="flex items-center gap-2 mb-1">
+        <LiveDot color={simRunning ? C.red : C.green} />
+        <span className="text-xs" style={{ color: C.inkSoft }}>
+          {simRunning ? "Simulation running — new readings every few seconds" : "Live feed idle · click Start Simulation or Simulate Leakage"}
+        </span>
+      </div>
+      <p className="text-xs mb-4" style={{ color: C.inkFaint }}>
+        Future deployment can connect physical flow/pressure sensors to this same incident workflow.
+      </p>
+
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <div className="flex flex-wrap gap-1.5">
+          {["All", ...BLOCKS].map((b) => (
+            <button
+              key={b}
+              onClick={() => setBlockFilter(b)}
+              className="rounded-full px-3 py-1.5 text-xs font-medium"
+              style={{ background: blockFilter === b ? C.teal : C.surface, color: blockFilter === b ? "#fff" : C.inkSoft, border: `1px solid ${blockFilter === b ? C.teal : C.border}` }}
+            >
+              {b === "All" ? "All Blocks" : `Block ${b}`}
+            </button>
+          ))}
+        </div>
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="rounded-md px-2.5 py-1.5 text-xs font-medium" style={{ border: `1px solid ${C.border}`, color: C.inkSoft }}>
+          {statusOptions.map((s) => <option key={s} value={s}>{s === "All" ? "All Statuses" : s}</option>)}
+        </select>
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search block / room / sensor"
+          className="rounded-md px-3 py-1.5 text-xs"
+          style={{ border: `1px solid ${C.border}`, minWidth: "13rem" }}
+        />
+      </div>
+
+      {fixtures.length === 0 ? (
+        <EmptyState icon="activity" title="No fixtures match" message="Try a different block, status or search term." />
+      ) : (
+        <div className="rounded-md bg-white overflow-hidden" style={{ border: `1px solid ${C.border}` }}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ background: C.bg, borderBottom: `1px solid ${C.border}` }}>
+                  {["Sensor", "Location", "Fixture", "Flow Rate", "Status", "Updated"].map((h) => (
+                    <th key={h} className="text-left px-4 py-2.5 text-xs font-semibold" style={{ color: C.inkSoft }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {fixtures.map((f) => (
+                  <tr key={f.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <td className="px-4 py-2.5" style={{ color: C.inkFaint, fontFamily: "monospace", fontSize: "12px" }}>{f.sensorId}</td>
+                    <td className="px-4 py-2.5" style={{ color: C.ink }}>Block {f.block} · {f.room}</td>
+                    <td className="px-4 py-2.5" style={{ color: C.inkSoft }}>{f.fixtureType}</td>
+                    <td className="px-4 py-2.5" style={{ color: f.status === "Normal" ? C.inkSoft : C.red, fontFamily: "monospace" }}>{f.flowRate} L/min</td>
+                    <td className="px-4 py-2.5"><Badge label={f.status} tone={FIXTURE_STATUS_TONE[f.status]} dot /></td>
+                    <td className="px-4 py-2.5 text-xs" style={{ color: C.inkFaint }}>{timeAgo(f.lastUpdated)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================================
+   ALERTS LIST
+============================================================================================ */
+
+function AlertsPage({ state, onNavigate }) {
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState("newest");
+  const statuses = ["All", "Reported", "Under Review", "Assigned", "In Progress", "Resolved"];
+  const SEVERITY_RANK = { Critical: 4, High: 3, Medium: 2, Low: 1 };
+
+  const alerts = useMemo(() => {
+    let list = [...state.incidents];
+    if (statusFilter !== "All") list = list.filter((a) => a.status === statusFilter);
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter((a) =>
+        a.id.toLowerCase().includes(q) ||
+        a.block.toLowerCase().includes(q) ||
+        a.room.toLowerCase().includes(q) ||
+        a.fixtureType.toLowerCase().includes(q)
+      );
+    }
+    if (sortBy === "newest") list.sort((a, b) => b.detectedAt - a.detectedAt);
+    else if (sortBy === "oldest") list.sort((a, b) => a.detectedAt - b.detectedAt);
+    else if (sortBy === "severity") list.sort((a, b) => (SEVERITY_RANK[b.severity] || 0) - (SEVERITY_RANK[a.severity] || 0));
+    return list;
+  }, [state.incidents, statusFilter, search, sortBy]);
+
+  return (
+    <div>
+      <SectionHeader title="Leakage Alerts" subtitle="Every detected or reported issue, with severity, location and status." />
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {statuses.map((s) => (
+          <button
+            key={s}
+            onClick={() => setStatusFilter(s)}
+            className="rounded-full px-3 py-1.5 text-xs font-medium"
+            style={{ background: statusFilter === s ? C.teal : C.surface, color: statusFilter === s ? "#fff" : C.inkSoft, border: `1px solid ${statusFilter === s ? C.teal : C.border}` }}
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <div className="relative flex-1" style={{ minWidth: "14rem", maxWidth: "22rem" }}>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by block, room, fixture or ID"
+            className="w-full rounded-md pl-3 pr-3 py-2 text-sm"
+            style={{ border: `1px solid ${C.border}` }}
+          />
+        </div>
+        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="rounded-md px-2.5 py-2 text-xs font-medium" style={{ border: `1px solid ${C.border}`, color: C.inkSoft }}>
+          <option value="newest">Sort: Newest first</option>
+          <option value="oldest">Sort: Oldest first</option>
+          <option value="severity">Sort: Highest priority</option>
+        </select>
+      </div>
+      {alerts.length === 0 ? (
+        <EmptyState icon="alert-triangle" title="No alerts in this view" message="Try a different filter or search term, or simulate a leakage from Live Monitoring." />
+      ) : (
+        <div className="space-y-2">
+          {alerts.map((a) => (
+            <button
+              key={a.id}
+              onClick={() => onNavigate("alertDetail", a.id)}
+              className="w-full text-left rounded-md bg-white p-4 flex flex-wrap items-center gap-3 hover:shadow-sm"
+              style={{ border: `1px solid ${C.border}`, borderLeft: `4px solid ${SEVERITY_BAR[a.severity]}` }}
+            >
+              <div className="flex-1" style={{ minWidth: "12rem" }}>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span style={{ color: C.inkFaint, fontFamily: "monospace", fontSize: "12px" }}>{a.id}</span>
+                  <Badge label={a.severity} tone={SEVERITY_TONE[a.severity]} />
+                  <Badge label={a.status} tone={ALERT_STATUS_TONE[a.status]} />
+                  <Badge label={a.source === "Student Report" ? "Student Report" : "Sensor"} tone={a.source === "Student Report" ? "info" : "neutral"} />
+                </div>
+                <div className="text-sm font-semibold mt-1" style={{ color: C.ink }}>Block {a.block} → {a.room} → {a.fixtureType}</div>
+                <div className="text-xs mt-0.5" style={{ color: C.inkSoft }}>
+                  {timeAgo(a.detectedAt)}{a.estimatedWaterLoss ? ` · ${a.estimatedWaterLoss} L estimated loss` : ""}
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-xs" style={{ color: C.inkFaint }}>Assigned</div>
+                <div className="text-sm font-medium" style={{ color: C.ink }}>{a.assignedTo || "—"}</div>
+              </div>
+              <Icon name="chevron-right" className="h-4 w-4" style={{ color: C.inkFaint }} />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================================
+   ALERT DETAIL
+============================================================================================ */
+
+function AlertDetailPage({ state, dispatch, alertId, onNavigate, addToast }) {
+  const incident = state.incidents.find((i) => i.id === alertId);
+  const [assignOpen, setAssignOpen] = useState(false);
+  const [resolveOpen, setResolveOpen] = useState(false);
+  const [legendOpen, setLegendOpen] = useState(false);
+  const [notes, setNotes] = useState("");
+  const [rootCause, setRootCause] = useState("");
+  const [parts, setParts] = useState("");
+
+  if (!incident) {
+    return (
+      <div>
+        <button onClick={() => onNavigate("alerts")} className="inline-flex items-center gap-1 text-xs font-medium mb-4" style={{ color: C.inkSoft }}>
+          <Icon name="chevron-left" className="h-3.5 w-3.5" /> Back to alerts
+        </button>
+        <EmptyState icon="alert-triangle" title="Alert not found" message="This alert may have been cleared by a demo reset. Return to the alerts list." />
+      </div>
+    );
+  }
+
+  const isStudentSource = incident.source === "Student Report";
+  const reportedLabel = isStudentSource ? "Reported at" : "Detected at";
+  const resolvedEvt = incident.timeline.find((t) => t.step === "Resolved");
+
+  function handleAck() {
+    dispatch({ type: "ACK_ALERT", id: incident.id });
+    addToast({ type: "info", title: "Marked under review", message: incident.id });
+  }
+  function handleAssign(staff) {
+    dispatch({ type: "ASSIGN_ALERT", id: incident.id, staff });
+    addToast({ type: "info", title: `Assigned to ${staff}`, message: incident.id });
+    setAssignOpen(false);
+  }
+  function handleStart() {
+    dispatch({ type: "START_REPAIR", id: incident.id });
+    addToast({ type: "info", title: "Repair started", message: incident.id });
+  }
+  function handleResolve() {
+    if (!notes.trim()) return;
+    dispatch({ type: "RESOLVE_ALERT", id: incident.id, notes: notes.trim(), rootCause: rootCause.trim(), partsUsed: parts.trim() });
+    addToast({ type: "success", title: "Marked resolved", message: incident.id });
+    setResolveOpen(false);
+  }
+
+  return (
+    <div>
+      <button onClick={() => onNavigate("alerts")} className="inline-flex items-center gap-1 text-xs font-medium mb-4" style={{ color: C.inkSoft }}>
+        <Icon name="chevron-left" className="h-3.5 w-3.5" /> Back to alerts
+      </button>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <div className="lg:col-span-2 space-y-4">
+          <div className="rounded-md bg-white p-5" style={{ border: `1px solid ${C.border}`, borderLeft: `4px solid ${SEVERITY_BAR[incident.severity]}` }}>
+            <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: C.inkFaint, letterSpacing: "0.04em" }}>Leakage Alert</div>
+            <div className="flex items-center gap-2 flex-wrap mb-2">
+              <span style={{ color: C.inkFaint, fontFamily: "monospace", fontSize: "12px" }}>{incident.id}</span>
+              <Badge label={incident.severity} tone={SEVERITY_TONE[incident.severity]} />
+              <Badge label={incident.status} tone={ALERT_STATUS_TONE[incident.status]} />
+              <Badge label={`Source: ${incident.source}`} tone={isStudentSource ? "info" : "neutral"} />
+              <button onClick={() => setLegendOpen((o) => !o)} className="text-xs font-medium underline decoration-dotted" style={{ color: C.inkFaint }}>
+                what does {incident.severity.toLowerCase()} mean?
+              </button>
+            </div>
+            {legendOpen && (
+              <div className="mb-3 rounded-md p-3 text-xs" style={{ background: C.bg, color: C.inkSoft }}>
+                {Object.entries(PRIORITY_INFO).map(([k, v]) => (
+                  <div key={k} className="flex gap-2 py-0.5">
+                    <span className="font-semibold flex-shrink-0" style={{ color: k === incident.severity ? C.teal : C.ink, width: "4.5rem" }}>{k}</span>
+                    <span>{v}</span>
+                  </div>
+                ))}
+                <div className="mt-1.5" style={{ color: C.inkFaint }}>Prototype workflow priorities — not an industry-standard scale.</div>
+              </div>
+            )}
+            <h1 className="text-lg font-semibold" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>
+              Block {incident.block} → Floor {incident.floor} → {incident.room}
+            </h1>
+            <p className="text-sm mt-0.5" style={{ color: C.inkSoft }}>{incident.fixtureType}</p>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-5">
+              <Stat label={reportedLabel} value={formatClock(incident.detectedAt)} />
+              <Stat label="Flow rate" value={incident.flowRate ? `${incident.flowRate} L/min` : "Not sensor-measured"} />
+              <Stat label="Est. water loss" value={incident.estimatedWaterLoss ? `${incident.estimatedWaterLoss} L` : "Not sensor-measured"} />
+              <Stat label="Source" value={incident.source} />
+              <Stat label="Assigned to" value={incident.assignedTo || "Unassigned"} />
+              <Stat label="Response time" value={responseTimeLabel(incident)} />
+            </div>
+
+            <p className="text-sm mt-4 rounded-md p-3" style={{ background: C.bg, color: C.inkSoft }}>{incident.description}</p>
+
+            <div className="text-xs font-semibold uppercase tracking-wide mt-5 mb-2" style={{ color: C.inkFaint, letterSpacing: "0.04em" }}>Incident Review</div>
+            <div className="flex flex-wrap gap-2">
+              {incident.status === "Reported" && <ActionButton onClick={handleAck} icon="check-circle" label="Acknowledge" />}
+              {incident.status === "Under Review" && <ActionButton onClick={() => setAssignOpen(true)} icon="users" label="Assign Maintenance" />}
+              {incident.status === "Assigned" && <ActionButton onClick={handleStart} icon="wrench" label="Start Repair" />}
+              {incident.status === "In Progress" && <ActionButton onClick={() => setResolveOpen(true)} icon="check" label="Mark Resolved" tone="green" />}
+              {incident.status === "Resolved" && (
+                <span className="text-xs font-medium inline-flex items-center gap-1.5" style={{ color: C.green }}>
+                  <Icon name="check-circle" className="h-4 w-4" /> Resolved
+                </span>
+              )}
+            </div>
+
+            {resolveOpen && (
+              <div className="mt-4 rounded-md p-4" style={{ background: C.bg, border: `1px solid ${C.border}` }}>
+                <div className="text-sm font-semibold mb-2" style={{ color: C.ink }}>Close out this job</div>
+                <label className="text-xs font-medium" style={{ color: C.inkSoft }}>Repair notes (required)</label>
+                <textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  rows={2}
+                  className="w-full mt-1 mb-3 rounded-md p-2 text-sm"
+                  style={{ border: `1px solid ${C.border}` }}
+                  placeholder="What was done to fix this?"
+                />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-medium" style={{ color: C.inkSoft }}>Root cause (optional)</label>
+                    <input value={rootCause} onChange={(e) => setRootCause(e.target.value)} className="w-full mt-1 rounded-md p-2 text-sm" style={{ border: `1px solid ${C.border}` }} placeholder="e.g. worn washer" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium" style={{ color: C.inkSoft }}>Parts used (optional)</label>
+                    <input value={parts} onChange={(e) => setParts(e.target.value)} className="w-full mt-1 rounded-md p-2 text-sm" style={{ border: `1px solid ${C.border}` }} placeholder="e.g. rubber washer" />
+                  </div>
+                </div>
+                <div className="flex gap-2 mt-3">
+                  <button onClick={handleResolve} disabled={!notes.trim()} className="rounded-md px-3 py-2 text-sm font-medium text-white disabled:opacity-50" style={{ background: C.green }}>Confirm Resolved</button>
+                  <button onClick={() => setResolveOpen(false)} className="rounded-md px-3 py-2 text-sm font-medium" style={{ border: `1px solid ${C.border}`, color: C.inkSoft }}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {incident.status === "Resolved" && (
+            <div className="rounded-md bg-white p-5" style={{ border: `1px solid ${C.border}` }}>
+              <div className="text-sm font-semibold mb-2" style={{ color: C.ink }}>Repair record</div>
+              <div className="text-sm" style={{ color: C.inkSoft }}>{incident.repairNotes}</div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-3 text-xs">
+                <div><span style={{ color: C.inkFaint }}>Root cause: </span><span style={{ color: C.ink }}>{incident.rootCause || "—"}</span></div>
+                <div><span style={{ color: C.inkFaint }}>Parts used: </span><span style={{ color: C.ink }}>{incident.partsUsed || "—"}</span></div>
+                <div><span style={{ color: C.inkFaint }}>Resolved by: </span><span style={{ color: C.ink }}>{incident.assignedTo || "—"}</span></div>
+                <div><span style={{ color: C.inkFaint }}>Resolved at: </span><span style={{ color: C.ink }}>{resolvedEvt ? formatClock(resolvedEvt.at) : "—"}</span></div>
+                <div><span style={{ color: C.inkFaint }}>Repair duration: </span><span style={{ color: C.ink }}>{repairDurationLabel(incident) || "—"}</span></div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-md bg-white p-5" style={{ border: `1px solid ${C.border}` }}>
+          <div className="text-sm font-semibold mb-4" style={{ color: C.ink }}>Status timeline</div>
+          <AlertTimeline status={incident.status} source={incident.source} />
+          <div className="mt-2 pt-4" style={{ borderTop: `1px solid ${C.border}` }}>
+            <div className="text-xs font-medium mb-2" style={{ color: C.inkSoft }}>Activity history</div>
+            <div className="space-y-2">
+              {incident.timeline.map((t, i) => (
+                <div key={i} className="flex gap-2 text-xs">
+                  <span className="flex-shrink-0" style={{ color: C.inkFaint, width: "3.6rem" }}>{formatClock(t.at)}</span>
+                  <span style={{ color: C.inkSoft }}>{auditLine(t.step, incident)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {assignOpen && (
+        <Modal title="Assign maintenance staff" onClose={() => setAssignOpen(false)}>
+          <div className="space-y-2">
+            {STAFF.map((s) => (
+              <button key={s} onClick={() => handleAssign(s)} className="w-full text-left rounded-md px-3 py-2.5 text-sm font-medium flex items-center justify-between" style={{ border: `1px solid ${C.border}`, color: C.ink }}>
+                {s} <Icon name="arrow-right" className="h-3.5 w-3.5" style={{ color: C.inkFaint }} />
+              </button>
+            ))}
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================================
+   MAINTENANCE (KANBAN)
+============================================================================================ */
+
+function MaintenancePage({ state, dispatch, onNavigate, addToast, role, currentUser }) {
+  const columns = ["Assigned", "In Progress", "Resolved"];
+  const openNew = state.incidents.filter((i) => ["Reported", "Under Review"].includes(i.status));
+  const grouped = { Assigned: [], "In Progress": [], Resolved: [] };
+  state.incidents.forEach((i) => { if (grouped[i.status]) grouped[i.status].push(i); });
+
+  const isMaintenanceStaff = role === "maintenance";
+  const myJobs = isMaintenanceStaff
+    ? state.incidents.filter((i) => i.assignedTo === currentUser.name && ["Assigned", "In Progress"].includes(i.status))
+    : [];
+
+  function quickStart(job) {
+    dispatch({ type: "START_REPAIR", id: job.id });
+    addToast({ type: "info", title: "Repair started", message: job.id });
+  }
+
+  return (
+    <div>
+      <SectionHeader title="Maintenance" subtitle="Work orders generated from leakage alerts and student reports." />
+
+      {openNew.length > 0 && (
+        <div className="mb-5 rounded-md p-3 flex items-center justify-between flex-wrap gap-2" style={{ background: C.redSoft, border: "1px solid #F3C6C0" }}>
+          <span className="text-sm font-medium" style={{ color: C.red }}>
+            {openNew.length} report{openNew.length > 1 ? "s" : ""} awaiting review / assignment
+          </span>
+          <button onClick={() => onNavigate("alerts")} className="text-xs font-semibold" style={{ color: C.red }}>Review alerts →</button>
+        </div>
+      )}
+
+      {isMaintenanceStaff && (
+        <div className="mb-6">
+          <div className="flex items-center justify-between mb-2.5">
+            <h3 className="text-sm font-semibold" style={{ color: C.ink }}>My Open Jobs</h3>
+            <span className="text-xs rounded-full px-2 py-0.5" style={{ background: C.bg, color: C.inkSoft }}>{myJobs.length}</span>
+          </div>
+          {myJobs.length === 0 ? (
+            <EmptyState icon="check-circle" title="No open jobs" message="All assigned maintenance work is currently up to date." />
+          ) : (
+            <div className="space-y-2.5">
+              {myJobs.map((job) => (
+                <div key={job.id} className="rounded-md bg-white p-3.5 flex flex-wrap items-center gap-3" style={{ border: `1px solid ${C.border}`, borderLeft: `4px solid ${SEVERITY_BAR[job.severity]}` }}>
+                  <div className="flex-1" style={{ minWidth: "12rem" }}>
+                    <div className="flex items-center gap-2 flex-wrap mb-0.5">
+                      <span style={{ color: C.inkFaint, fontFamily: "monospace", fontSize: "12px" }}>{job.id}</span>
+                      <Badge label={job.severity} tone={SEVERITY_TONE[job.severity]} />
+                      <Badge label={job.status} tone={ALERT_STATUS_TONE[job.status]} />
+                    </div>
+                    <button onClick={() => onNavigate("alertDetail", job.id)} className="text-sm font-medium hover:underline" style={{ color: C.ink }}>
+                      Block {job.block} · {job.room} · {job.fixtureType}
+                    </button>
+                    <div className="text-xs mt-0.5" style={{ color: C.inkFaint }}>{job.id.startsWith("FF-RPT") ? "Student report" : "Sensor alert"} · assigned {timeAgo(job.detectedAt)}</div>
+                  </div>
+                  {job.status === "Assigned" && <ActionButton onClick={() => quickStart(job)} icon="wrench" label="Start Repair" />}
+                  {job.status === "In Progress" && <ActionButton onClick={() => onNavigate("alertDetail", job.id)} icon="check" label="Mark Resolved" tone="green" />}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="text-sm font-semibold mb-2.5" style={{ color: C.ink }}>{isMaintenanceStaff ? "All Work Orders" : "Work Orders"}</div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {columns.map((col) => (
+          <div key={col}>
+            <div className="flex items-center justify-between mb-2.5">
+              <span className="text-sm font-semibold" style={{ color: C.ink }}>{col}</span>
+              <span className="text-xs rounded-full px-2 py-0.5" style={{ background: C.bg, color: C.inkSoft }}>{grouped[col].length}</span>
+            </div>
+            <div className="space-y-2.5">
+              {grouped[col].length === 0 && (
+                <div className="text-xs rounded-md p-4 text-center" style={{ border: `1px dashed ${C.borderStrong}`, color: C.inkFaint }}>No jobs</div>
+              )}
+              {grouped[col].map((job) => (
+                <button
+                  key={job.id}
+                  onClick={() => onNavigate("alertDetail", job.id)}
+                  className="w-full text-left rounded-md bg-white p-3.5"
+                  style={{ border: `1px solid ${C.border}`, borderLeft: `4px solid ${SEVERITY_BAR[job.severity]}` }}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span style={{ color: C.inkFaint, fontFamily: "monospace", fontSize: "12px" }}>{job.id}</span>
+                    <Badge label={job.severity} tone={SEVERITY_TONE[job.severity]} />
+                  </div>
+                  <div className="text-sm font-medium" style={{ color: C.ink }}>Block {job.block} · {job.room}</div>
+                  <div className="text-xs mt-0.5" style={{ color: C.inkSoft }}>{job.fixtureType}</div>
+                  <div className="flex items-center justify-between mt-2.5">
+                    <span className="text-xs" style={{ color: C.inkFaint }}>{job.assignedTo || "Unassigned"}</span>
+                    <span className="text-xs" style={{ color: C.inkFaint }}>{timeAgo(job.detectedAt)}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================================
+   STUDENT REPORTING
+============================================================================================ */
+
+function StudentReportRow({ report, isOpen, onToggle }) {
+  const problem = report.problemType || report.description.split(":")[0];
+  return (
+    <div id={`report-${report.id}`} className="rounded-md" style={{ border: `1px solid ${C.border}` }}>
+      <button onClick={onToggle} className="w-full text-left p-3 flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div style={{ color: C.inkFaint, fontFamily: "monospace", fontSize: "11px" }}>{report.id}</div>
+          <div className="text-sm font-medium truncate" style={{ color: C.ink }}>Block {report.block} · {report.floor} · {report.room}</div>
+          <div className="text-xs mt-0.5" style={{ color: C.inkSoft }}>{problem} · {timeAgo(report.detectedAt)}</div>
+        </div>
+        <div className="flex flex-col items-end gap-1 flex-shrink-0">
+          <Badge label={report.status} tone={ALERT_STATUS_TONE[report.status]} />
+          <Badge label={report.severity} tone={SEVERITY_TONE[report.severity]} />
+        </div>
+      </button>
+      {isOpen && (
+        <div className="px-3 pb-3">
+          <AlertTimeline status={report.status} source={report.source} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StudentReportPage({ state, dispatch, currentUser, addToast }) {
+  const [block, setBlock] = useState("A");
+  const [floor, setFloor] = useState("1");
+  const [room, setRoom] = useState("");
+  const [problemType, setProblemType] = useState(PROBLEM_TYPES[0]);
+  const [fixtureType, setFixtureType] = useState(FIXTURE_OPTIONS[0]);
+  const [description, setDescription] = useState("");
+  const [urgency, setUrgency] = useState("Medium");
+  const [errors, setErrors] = useState({});
+  const [justSubmittedId, setJustSubmittedId] = useState(null);
+  const [openReportId, setOpenReportId] = useState(null);
+
+  const myReports = useMemo(
+    () => state.incidents.filter((i) => i.source === "Student Report" && i.reportedBy === currentUser.email).sort((a, b) => b.detectedAt - a.detectedAt),
+    [state.incidents, currentUser.email]
+  );
+  const confirmedReport = justSubmittedId ? myReports.find((r) => r.id === justSubmittedId) : null;
+
+  function submit(e) {
+    e.preventDefault();
+    const errs = {};
+    if (!room.trim()) errs.room = "Please enter a room or facility.";
+    if (!description.trim()) errs.description = "Please add a short description.";
+    setErrors(errs);
+    if (Object.keys(errs).length) return;
+    dispatch({ type: "SUBMIT_STUDENT_REPORT", payload: { block, floor, room: room.trim(), fixtureType, problemType, description: description.trim(), urgency, reporter: currentUser.email } });
+    addToast({ type: "success", title: "Report submitted", message: "Thanks — hostel management has been notified." });
+  }
+
+  useEffect(() => {
+    if (state.lastReportId && state.lastReportId !== justSubmittedId) {
+      const mine = state.incidents.find((i) => i.id === state.lastReportId && i.reportedBy === currentUser.email);
+      if (mine) {
+        setJustSubmittedId(state.lastReportId);
+        setRoom("");
+        setDescription("");
+      }
+    }
+    // eslint-disable-next-line
+  }, [state.lastReportId]);
+
+  return (
+    <div>
+      <SectionHeader title="Report a Water Issue" subtitle="Spotted a leaking tap, spray or pipe? Let us know and we'll route it to management." />
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <div className="lg:col-span-2">
+          {confirmedReport ? (
+            <div className="rounded-md bg-white p-6" style={{ border: `1px solid ${C.border}`, borderTop: `4px solid ${C.green}` }}>
+              <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide mb-3" style={{ color: C.green, letterSpacing: "0.04em" }}>
+                <Icon name="check-circle" className="h-4 w-4" /> Report Submitted
+              </div>
+              <div style={{ color: C.inkFaint, fontFamily: "monospace", fontSize: "13px" }}>{confirmedReport.id}</div>
+              <div className="text-lg font-semibold mt-1" style={{ color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>
+                Block {confirmedReport.block} · {confirmedReport.floor} · {confirmedReport.room}
+              </div>
+              <div className="text-sm mt-0.5" style={{ color: C.inkSoft }}>{confirmedReport.problemType || confirmedReport.description.split(":")[0]}</div>
+              <div className="flex items-center gap-2 mt-3">
+                <Badge label={`Priority: ${confirmedReport.severity}`} tone={SEVERITY_TONE[confirmedReport.severity]} />
+                <Badge label={confirmedReport.status} tone={ALERT_STATUS_TONE[confirmedReport.status]} />
+              </div>
+              <p className="text-sm mt-4" style={{ color: C.inkSoft }}>Your report has been sent to hostel management.</p>
+              <div className="flex flex-wrap gap-2 mt-5">
+                <button
+                  onClick={() => setOpenReportId(confirmedReport.id)}
+                  className="rounded-md px-3.5 py-2 text-sm font-medium text-white"
+                  style={{ background: C.teal }}
+                >
+                  View My Report
+                </button>
+                <button
+                  onClick={() => setJustSubmittedId(null)}
+                  className="rounded-md px-3.5 py-2 text-sm font-medium"
+                  style={{ border: `1px solid ${C.border}`, color: C.inkSoft }}
+                >
+                  Report Another Issue
+                </button>
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={submit} className="rounded-md bg-white p-5 space-y-4" style={{ border: `1px solid ${C.border}` }}>
+              <div className="grid grid-cols-3 gap-3">
+                <Field label="Hostel Block">
+                  <select value={block} onChange={(e) => setBlock(e.target.value)} className="w-full rounded-md p-2 text-sm" style={{ border: `1px solid ${C.border}` }}>
+                    {BLOCKS.map((b) => <option key={b} value={b}>Block {b}</option>)}
+                  </select>
+                </Field>
+                <Field label="Floor">
+                  <select value={floor} onChange={(e) => setFloor(e.target.value)} className="w-full rounded-md p-2 text-sm" style={{ border: `1px solid ${C.border}` }}>
+                    {["Ground", "1", "2", "3"].map((f) => <option key={f} value={f}>{f}</option>)}
+                  </select>
+                </Field>
+                <Field label="Room / Facility" error={errors.room}>
+                  <input value={room} onChange={(e) => setRoom(e.target.value)} placeholder="A-103 or Ground Floor Washroom" className="w-full rounded-md p-2 text-sm" style={{ border: `1px solid ${errors.room ? C.red : C.border}` }} />
+                </Field>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Problem Type">
+                  <select value={problemType} onChange={(e) => setProblemType(e.target.value)} className="w-full rounded-md p-2 text-sm" style={{ border: `1px solid ${C.border}` }}>
+                    {PROBLEM_TYPES.map((p) => <option key={p}>{p}</option>)}
+                  </select>
+                </Field>
+                <Field label="Fixture Type">
+                  <select value={fixtureType} onChange={(e) => setFixtureType(e.target.value)} className="w-full rounded-md p-2 text-sm" style={{ border: `1px solid ${C.border}` }}>
+                    {FIXTURE_OPTIONS.map((f) => <option key={f}>{f}</option>)}
+                  </select>
+                </Field>
+              </div>
+              <Field label="Description" error={errors.description}>
+                <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} placeholder="Describe where the leakage is and what you observed." className="w-full rounded-md p-2 text-sm" style={{ border: `1px solid ${errors.description ? C.red : C.border}` }} />
+              </Field>
+              <Field label="Urgency">
+                <div className="flex flex-wrap gap-2">
+                  {URGENCY_OPTIONS.map((u) => (
+                    <button
+                      type="button"
+                      key={u}
+                      onClick={() => setUrgency(u)}
+                      className="rounded-full px-3 py-1.5 text-xs font-medium"
+                      style={{ background: urgency === u ? C.teal : C.surface, color: urgency === u ? "#fff" : C.inkSoft, border: `1px solid ${urgency === u ? C.teal : C.border}` }}
+                    >
+                      {u}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+              <p className="text-xs" style={{ color: C.inkFaint }}>Provide the most precise location possible so maintenance can respond faster.</p>
+              <button type="submit" className="inline-flex items-center gap-1.5 rounded-md px-4 py-2.5 text-sm font-semibold text-white" style={{ background: C.teal }}>
+                <Icon name="send" className="h-3.5 w-3.5" /> Submit Report
+              </button>
+            </form>
+          )}
+        </div>
+
+        <div className="rounded-md bg-white p-5" style={{ border: `1px solid ${C.border}` }}>
+          <div className="text-sm font-semibold mb-3" style={{ color: C.ink }}>My reports</div>
+          {myReports.length === 0 ? (
+            <EmptyState icon="file-text" title="No reports yet" message="Your submitted water issues will appear here." />
+          ) : (
+            <div className="space-y-2">
+              {myReports.map((r) => (
+                <StudentReportRow key={r.id} report={r} isOpen={openReportId === r.id} onToggle={() => setOpenReportId((cur) => (cur === r.id ? null : r.id))} />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================================
+   HOSTEL MAP
+============================================================================================ */
+
+function HostelMapPage({ state, onNavigate }) {
+  const [selected, setSelected] = useState(null);
+  const selectedFixture = state.fixtures.find((f) => f.id === selected);
+  const relatedIncident = selectedFixture
+    ? [...state.incidents].filter((i) => i.fixtureId === selectedFixture.id && i.status !== "Resolved").sort((a, b) => b.detectedAt - a.detectedAt)[0]
+    : null;
+
+  function statusColor(s) {
+    return { Normal: C.green, Watch: C.amber, "Leakage Suspected": C.orange, Critical: C.red }[s] || C.green;
+  }
+
+  return (
+    <div>
+      <SectionHeader title="Hostel Map" subtitle="Schematic layout of hostel blocks and fixtures — a paid map API isn't required for this prototype." />
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+        <div className="xl:col-span-2 rounded-md bg-white p-4" style={{ border: `1px solid ${C.border}` }}>
+          <svg viewBox="0 0 850 260" className="w-full h-auto">
+            {BLOCKS.map((b, bi) => {
+              const x0 = 20 + bi * 280;
+              return (
+                <g key={b}>
+                  <rect x={x0} y={40} width={230} height={180} rx={10} fill={C.bg} stroke={C.border} />
+                  <text x={x0 + 115} y={58} textAnchor="middle" fontSize="13" fontWeight="600" fill={C.ink}>Block {b}</text>
+                </g>
+              );
+            })}
+            {state.fixtures.map((f) => (
+              <g key={f.id} onClick={() => setSelected(f.id)} style={{ cursor: "pointer" }}>
+                <circle cx={f.x} cy={f.y} r={selected === f.id ? 7 : 5} fill={statusColor(f.status)} stroke="#fff" strokeWidth="1.5" />
+              </g>
+            ))}
+          </svg>
+          <div className="text-xs font-semibold mt-3 pt-3" style={{ borderTop: `1px solid ${C.border}`, color: C.inkFaint }}>Map Legend</div>
+          <div className="flex flex-wrap gap-4 mt-2">
+            {[["Normal", C.green], ["Watch", C.amber], ["Suspected", C.orange], ["Critical", C.red]].map(([label, color]) => (
+              <div key={label} className="flex items-center gap-1.5 text-xs" style={{ color: C.inkSoft }}>
+                <span className="h-2.5 w-2.5 rounded-full inline-block" style={{ background: color }} /> {label}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-md bg-white p-4" style={{ border: `1px solid ${C.border}` }}>
+          {!selectedFixture ? (
+            <EmptyState icon="map-pin" title="Select a marker" message="Click any fixture on the map to see its status and location." />
+          ) : (
+            <div>
+              <div className="text-xs" style={{ color: C.inkFaint }}>{selectedFixture.sensorId}</div>
+              <div className="text-base font-semibold mt-1" style={{ color: C.ink }}>Block {selectedFixture.block} · {selectedFixture.floor} · {selectedFixture.room}</div>
+              <div className="text-sm" style={{ color: C.inkSoft }}>{selectedFixture.fixtureType}</div>
+              <div className="grid grid-cols-2 gap-3 mt-4">
+                <Stat label="Status" value={selectedFixture.status} />
+                <Stat label="Flow rate" value={`${selectedFixture.flowRate} L/min`} />
+              </div>
+              {relatedIncident ? (
+                <div className="mt-4 pt-4" style={{ borderTop: `1px solid ${C.border}` }}>
+                  <div className="text-xs" style={{ color: C.inkFaint }}>Incident ID</div>
+                  <div className="text-sm font-medium mt-0.5" style={{ color: C.ink }}>{relatedIncident.id}</div>
+                  <div className="text-xs mt-0.5" style={{ color: C.inkSoft }}>Assigned to {relatedIncident.assignedTo || "—"}</div>
+                  <button onClick={() => onNavigate("alertDetail", relatedIncident.id)} className="text-xs font-semibold mt-2" style={{ color: C.teal }}>Open alert details →</button>
+                </div>
+              ) : (
+                <div className="mt-4 pt-4 text-xs" style={{ borderTop: `1px solid ${C.border}`, color: C.inkFaint }}>No open alert for this fixture.</div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================================
+   ANALYTICS
+============================================================================================ */
+
+function AnalyticsPage({ state }) {
+  const [range, setRange] = useState(7);
+  const trend = useMemo(() => buildTrend(state.incidents, range), [state.incidents, range]);
+  const byBlock = useMemo(() => incidentsByBlock(state.incidents), [state.incidents]);
+  const byFixture = useMemo(() => incidentsByFixtureType(state.incidents), [state.incidents]);
+  const kpis = useMemo(() => computeKpis(state), [state]);
+  const resolvedCount = state.incidents.filter((i) => i.status === "Resolved").length;
+  const openCount = state.incidents.length - resolvedCount;
+  const topBlock = useMemo(() => byBlock.reduce((best, b) => (!best || b.count > best.count ? b : best), null), [byBlock]);
+  const topFixture = useMemo(() => byFixture.reduce((best, f) => (!best || f.count > best.count ? f : best), null), [byFixture]);
+  const avgResolutionLabel = useMemo(() => {
+    const durations = state.incidents
+      .filter((i) => i.status === "Resolved")
+      .map((i) => {
+        const resolvedEvt = i.timeline.find((t) => t.step === "Resolved");
+        return resolvedEvt ? (resolvedEvt.at - i.detectedAt) / 60000 : null;
+      })
+      .filter((m) => m != null);
+    if (!durations.length) return "—";
+    const avg = Math.round(durations.reduce((a, b) => a + b, 0) / durations.length);
+    return avg < 60 ? `${avg} min` : `${Math.floor(avg / 60)}h ${avg % 60}m`;
+  }, [state.incidents]);
+
+  return (
+    <div>
+      <SectionHeader
+        title="Analytics"
+        subtitle="Trends and performance computed live from current prototype data."
+        action={
+          <div className="flex gap-1.5">
+            {[7, 30, 90].map((d) => (
+              <button
+                key={d}
+                onClick={() => setRange(d)}
+                className="rounded-full px-3 py-1.5 text-xs font-medium"
+                style={{ background: range === d ? C.teal : C.surface, color: range === d ? "#fff" : C.inkSoft, border: `1px solid ${range === d ? C.teal : C.border}` }}
+              >
+                {d} days
+              </button>
+            ))}
+          </div>
+        }
+      />
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+        <KpiCard icon="droplets" tone="orange" label="Water Loss Today" value={`${kpis.waterLossToday.toLocaleString()} L`} sub="Estimated" />
+        <KpiCard icon="waves" tone="teal" label="Est. Water Saved" value={`${kpis.estimatedWaterSaved.toLocaleString()} L`} sub="Prototype estimate from resolved incidents" />
+        <KpiCard icon="clock" tone="blue" label="Avg Response Time" value={`${kpis.avgResponseTime} min`} sub="Detection → assignment" />
+        <KpiCard icon="check-circle" tone="green" label="Resolved" value={kpis.resolvedThisMonth} sub="Last 30 days · demo data" />
+      </div>
+
+      <div className="rounded-md bg-white p-4 mb-5" style={{ border: `1px solid ${C.border}` }}>
+        <h3 className="text-sm font-semibold mb-3" style={{ color: C.ink }}>Prototype Insights</h3>
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+          <Stat label="Highest incident block" value={topBlock ? `Block ${topBlock.block.replace("Block ", "")} (${topBlock.count})` : "—"} />
+          <Stat label="Most reported fixture" value={topFixture ? `${topFixture.type} (${topFixture.count})` : "—"} />
+          <Stat label="Avg resolution time" value={avgResolutionLabel} />
+          <Stat label="Open vs resolved" value={`${openCount} open · ${resolvedCount} resolved`} />
+          <Stat label="Est. water saved" value={`${kpis.estimatedWaterSaved.toLocaleString()} L`} />
+        </div>
+        <div className="text-xs mt-3" style={{ color: C.inkFaint }}>Operational summary calculated from current demo data — not AI-generated.</div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-4">
+        <div className="xl:col-span-2 rounded-md bg-white p-4" style={{ border: `1px solid ${C.border}` }}>
+          <h3 className="text-sm font-semibold mb-3" style={{ color: C.ink }}>Water loss trend</h3>
+          <div style={{ height: 230 }}>
+            <TrendChart data={trend} height={230} filled={false} color={C.teal} />
+          </div>
+        </div>
+        <div className="rounded-md bg-white p-4" style={{ border: `1px solid ${C.border}` }}>
+          <h3 className="text-sm font-semibold mb-3" style={{ color: C.ink }}>Resolution rate</h3>
+          <div style={{ height: 230 }} className="flex flex-col items-center justify-center">
+            <div style={{ maxWidth: 170 }}>
+              <DonutChart resolved={resolvedCount} open={openCount} size={170} />
+            </div>
+            <div className="flex items-center gap-4 mt-3">
+              <div className="flex items-center gap-1.5 text-xs" style={{ color: C.inkSoft }}>
+                <span className="h-2.5 w-2.5 rounded-full inline-block" style={{ background: C.green }} /> Resolved ({resolvedCount})
+              </div>
+              <div className="flex items-center gap-1.5 text-xs" style={{ color: C.inkSoft }}>
+                <span className="h-2.5 w-2.5 rounded-full inline-block" style={{ background: C.redSoft, border: `2px solid ${C.red}` }} /> Open ({openCount})
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="rounded-md bg-white p-4" style={{ border: `1px solid ${C.border}` }}>
+          <h3 className="text-sm font-semibold mb-3" style={{ color: C.ink }}>Incidents by block</h3>
+          <div style={{ height: 200 }}>
+            <BarChartV data={byBlock} labelKey="block" valueKey="count" color={C.blue} height={200} />
+          </div>
+        </div>
+        <div className="rounded-md bg-white p-4" style={{ border: `1px solid ${C.border}` }}>
+          <h3 className="text-sm font-semibold mb-3" style={{ color: C.ink }}>Incidents by fixture type</h3>
+          <div style={{ height: 200 }}>
+            <BarChartH data={byFixture} labelKey="type" valueKey="count" color={C.teal} height={200} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================================
+   REPORTS
+============================================================================================ */
+
+function ReportsPage({ state, addToast }) {
+  const kpis = useMemo(() => computeKpis(state), [state]);
+  const byBlock = useMemo(() => incidentsByBlock(state.incidents), [state.incidents]);
+  const resolved = state.incidents.filter((i) => i.status === "Resolved");
+  const open = state.incidents.filter((i) => i.status !== "Resolved");
+
+  function exportCsv() {
+    try {
+      const header = ["ID", "Block", "Room", "Fixture", "Severity", "Status", "Detected At", "Est. Water Loss (L)", "Assigned To"];
+      const rows = state.incidents.map((i) => [
+        i.id, i.block, i.room, i.fixtureType, i.severity, i.status,
+        new Date(i.detectedAt).toISOString(), i.estimatedWaterLoss || "", i.assignedTo || "",
+      ]);
+      const csv = [header, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "flowfix-incidents.csv";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      addToast({ type: "success", title: "CSV exported", message: `${state.incidents.length} incidents` });
+    } catch (e) {
+      addToast({ type: "warning", title: "Export unavailable", message: "Your browser blocked the download." });
+    }
+  }
+
+  return (
+    <div>
+      <SectionHeader
+        title="Reports"
+        subtitle="Summary suitable for a faculty walkthrough."
+        action={
+          <button onClick={exportCsv} className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium text-white" style={{ background: C.teal }}>
+            <Icon name="download" className="h-3.5 w-3.5" /> Export CSV
+          </button>
+        }
+      />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+        <KpiCard icon="clipboard-list" tone="blue" label="Total Incidents" value={state.incidents.length} sub="All time (demo)" />
+        <KpiCard icon="check-circle" tone="green" label="Resolved" value={resolved.length} sub={`${state.incidents.length ? Math.round((resolved.length / state.incidents.length) * 100) : 0}% resolution rate`} />
+        <KpiCard icon="wrench" tone="amber" label="Open" value={open.length} sub="Awaiting action" />
+        <KpiCard icon="clock" tone="teal" label="Avg Response" value={`${kpis.avgResponseTime} min`} sub="Detection → assignment" />
+      </div>
+      <div className="rounded-md bg-white p-4" style={{ border: `1px solid ${C.border}` }}>
+        <h3 className="text-sm font-semibold mb-3" style={{ color: C.ink }}>Hostel-wise incidents</h3>
+        <div className="space-y-2">
+          {byBlock.map((b) => (
+            <div key={b.block} className="flex items-center gap-3">
+              <span className="text-xs flex-shrink-0" style={{ color: C.inkSoft, width: "4rem" }}>{b.block}</span>
+              <div className="flex-1 h-2 rounded-full" style={{ background: C.bg }}>
+                <div className="h-2 rounded-full" style={{ width: `${state.incidents.length ? (b.count / state.incidents.length) * 100 : 0}%`, background: C.teal }} />
+              </div>
+              <span className="text-xs text-right" style={{ color: C.inkFaint, width: "1.5rem" }}>{b.count}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================================
+   USERS (read-only demo directory) & SETTINGS
+============================================================================================ */
+
+function UsersPage() {
+  const accounts = [
+    { name: "Meera Iyer", role: "Administrator", email: "admin@flowfix.demo" },
+    { name: "Ravi Kumar", role: "Maintenance", email: "maintenance@flowfix.demo" },
+    { name: "Kiran Reddy", role: "Maintenance", email: "—" },
+    { name: "Anjali Rao", role: "Maintenance", email: "—" },
+    { name: "Suresh Naidu", role: "Maintenance", email: "—" },
+    { name: "Aditya Sharma", role: "Student", email: "student@flowfix.demo" },
+  ];
+  return (
+    <div>
+      <SectionHeader title="Users" subtitle="Demo directory of accounts used in this prototype." />
+      <div className="rounded-md bg-white overflow-hidden" style={{ border: `1px solid ${C.border}` }}>
+        <table className="w-full text-sm">
+          <thead>
+            <tr style={{ background: C.bg, borderBottom: `1px solid ${C.border}` }}>
+              {["Name", "Role", "Email"].map((h) => (
+                <th key={h} className="text-left px-4 py-2.5 text-xs font-semibold" style={{ color: C.inkSoft }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {accounts.map((a) => (
+              <tr key={a.name} style={{ borderBottom: `1px solid ${C.border}` }}>
+                <td className="px-4 py-2.5 font-medium" style={{ color: C.ink }}>{a.name}</td>
+                <td className="px-4 py-2.5" style={{ color: C.inkSoft }}>{a.role}</td>
+                <td className="px-4 py-2.5" style={{ color: C.inkFaint, fontFamily: "monospace", fontSize: "12px" }}>{a.email}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function SettingsPage({ currentUser }) {
+  return (
+    <div>
+      <SectionHeader title="Settings" subtitle="Account and prototype information." />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="rounded-md bg-white p-5" style={{ border: `1px solid ${C.border}` }}>
+          <h3 className="text-sm font-semibold mb-3" style={{ color: C.ink }}>Account</h3>
+          <div className="space-y-3">
+            <Stat label="Name" value={currentUser.name} />
+            <Stat label="Role" value={currentUser.title} />
+            <Stat label="Email" value={currentUser.email} />
+          </div>
+        </div>
+        <div className="rounded-md bg-white p-5" style={{ border: `1px solid ${C.border}` }}>
+          <h3 className="text-sm font-semibold mb-3" style={{ color: C.ink }}>About this prototype</h3>
+          <p className="text-xs leading-relaxed" style={{ color: C.inkSoft }}>
+            FlowFix is an academic prototype. Sensor readings on the Live Monitoring and Hostel Map pages are
+            simulated in-browser. Data you create (alerts, assignments, repairs, reports) is saved to this browser
+            and persists on reload.
+          </p>
+        </div>
+        <div className="rounded-md bg-white p-5 lg:col-span-2" style={{ border: `1px solid ${C.border}` }}>
+          <h3 className="text-sm font-semibold mb-3" style={{ color: C.ink }}>Prototype Architecture</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide mb-1.5" style={{ color: C.inkFaint, letterSpacing: "0.04em" }}>Current</div>
+              <div className="text-xs rounded-md p-3" style={{ background: C.bg, color: C.inkSoft }}>Simulated sensor readings → FlowFix incident workflow</div>
+            </div>
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide mb-1.5" style={{ color: C.inkFaint, letterSpacing: "0.04em" }}>Future</div>
+              <div className="text-xs rounded-md p-3" style={{ background: C.bg, color: C.inkSoft }}>
+                Physical sensors → Data ingestion (<code>POST /api/sensors/readings</code>) → Leakage detection → Location mapping → Alerts → Maintenance → Analytics
+              </div>
+            </div>
+          </div>
+          <p className="text-xs mt-3" style={{ color: C.inkFaint }}>Physical sensors are not connected in the current prototype.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================================
+   APP SHELL
+============================================================================================ */
+
+const STORAGE_KEY = "flowfix_app_state_v1";
+
+async function loadPersisted() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+async function persist(state) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    /* best effort only — storage may be unavailable or full */
+  }
+}
+function sleep(ms) {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
+function App() {
+  const [state, setState] = useState(null);
+  const stateRef = useRef(null);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [view, setView] = useState("dashboard");
+  const [selectedAlertId, setSelectedAlertId] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [toasts, setToasts] = useState([]);
+  const [simRunning, setSimRunning] = useState(false);
+  const simTimer = useRef(null);
+  const [demoRunning, setDemoRunning] = useState(false);
+  const [demoStep, setDemoStep] = useState(-1);
+  const [confirmReset, setConfirmReset] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const loaded = await loadPersisted();
+      if (!cancelled) setState(loaded || seedState());
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    stateRef.current = state;
+    if (state) persist(state);
+  }, [state]);
+
+  useEffect(() => () => { if (simTimer.current) clearInterval(simTimer.current); }, []);
+
+  const addToast = useCallback((t) => {
+    const id = Math.random().toString(36).slice(2);
+    setToasts((prev) => [...prev, { id, ...t }]);
+    setTimeout(() => setToasts((prev) => prev.filter((x) => x.id !== id)), 4200);
+  }, []);
+  const dismissToast = useCallback((id) => setToasts((prev) => prev.filter((x) => x.id !== id)), []);
+  const dispatch = useCallback((action) => setState((prev) => reducer(prev, action)), []);
+
+  function handleLogin(role) {
+    const account = DEMO_ACCOUNTS.find((a) => a.role === role);
+    setCurrentUser(account);
+    setView(role === "student" ? "report" : "dashboard");
+  }
+  function handleLogout() {
+    setCurrentUser(null);
+    setSelectedAlertId(null);
+    setNotifOpen(false);
+    if (simTimer.current) {
+      clearInterval(simTimer.current);
+      simTimer.current = null;
+      setSimRunning(false);
+    }
+  }
+  function handleNavigate(key, alertId) {
+    if (alertId) setSelectedAlertId(alertId);
+    setView(key);
+    setNotifOpen(false);
+    setSidebarOpen(false);
+  }
+
+  function toggleSimulation() {
+    if (simRunning) {
+      if (simTimer.current) clearInterval(simTimer.current);
+      simTimer.current = null;
+      setSimRunning(false);
+    } else {
+      setSimRunning(true);
+      simTimer.current = setInterval(() => dispatch({ type: "SIMULATE_LEAKAGE" }), 9000);
+    }
+  }
+
+  function requestReset() { setConfirmReset(true); }
+  function confirmDoReset() {
+    dispatch({ type: "RESET_DEMO" });
+    setConfirmReset(false);
+    setSelectedAlertId(null);
+    addToast({ type: "info", title: "Demo data reset", message: "All incidents and fixtures restored to seed state." });
+  }
+
+  async function runDemoScenario() {
+    if (demoRunning) return;
+    setDemoRunning(true);
+    setDemoStep(0);
+    handleNavigate("dashboard");
+
+    const demoStudent = DEMO_ACCOUNTS.find((a) => a.role === "student");
+    const forcedId = "FF-RPT-1047";
+
+    // Step 0: Student submits a report
+    dispatch({
+      type: "SUBMIT_STUDENT_REPORT",
+      payload: {
+        block: "A",
+        floor: "Ground",
+        room: "G05",
+        fixtureType: "Pipe",
+        problemType: "Pipe Leakage",
+        description: "Water leakage observed from the main pipe near G05.",
+        urgency: "High",
+        reporter: demoStudent.email,
+        forceId: forcedId,
+      },
+    });
+    addToast({ type: "info", title: `${demoStudent.name} submitted a report`, message: `${forcedId} · Block A · Ground · G05` });
+
+    await sleep(1100);
+    setDemoStep(1);
+    addToast({ type: "info", title: "Hostel management notified", message: forcedId });
+    handleNavigate("alertDetail", forcedId);
+
+    await sleep(1300);
+    setDemoStep(2);
+    dispatch({ type: "ACK_ALERT", id: forcedId });
+
+    await sleep(1200);
+    setDemoStep(3);
+    dispatch({ type: "ASSIGN_ALERT", id: forcedId, staff: "Ravi Kumar" });
+    addToast({ type: "info", title: "Ravi Kumar assigned", message: forcedId });
+
+    await sleep(1200);
+    setDemoStep(4);
+    addToast({ type: "info", title: "Maintenance sees the job", message: "Ravi Kumar's open jobs list" });
+
+    await sleep(1100);
+    setDemoStep(5);
+    dispatch({ type: "START_REPAIR", id: forcedId });
+
+    await sleep(1300);
+    setDemoStep(6);
+    dispatch({
+      type: "RESOLVE_ALERT",
+      id: forcedId,
+      notes: "Replaced the damaged pipe section near G05 and pressure-tested the joint.",
+      rootCause: "Corroded pipe joint",
+      partsUsed: "Pipe section, joint fitting",
+    });
+    addToast({ type: "success", title: "Issue marked resolved", message: forcedId });
+
+    await sleep(1200);
+    setDemoStep(7);
+    handleNavigate("dashboard");
+
+    await sleep(1100);
+    setDemoStep(8);
+    addToast({ type: "success", title: `${demoStudent.name} sees the report as Resolved`, message: forcedId });
+
+    await sleep(1200);
+    setDemoRunning(false);
+    setDemoStep(-1);
+  }
+
+  if (!state) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ background: C.bg }}>
+        <style>{GLOBAL_STYLE}</style>
+        <div className="flex flex-col items-center gap-3">
+          <FlowFixMark size={40} />
+          <span className="text-sm" style={{ color: C.inkSoft }}>Loading FlowFix…</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <>
+        <style>{GLOBAL_STYLE}</style>
+        <LoginPage onLogin={handleLogin} />
+      </>
+    );
+  }
+
+  const nav = NAV[currentUser.role] || [];
+  const navMatch = nav.find((n) => n.key === view);
+  const pageTitle = (navMatch && navMatch.label) || (view === "alertDetail" ? "Alert Detail" : "FlowFix");
+
+  return (
+    <div className="min-h-screen flex" style={{ background: C.bg, fontFamily: "'Inter', sans-serif" }}>
+      <style>{GLOBAL_STYLE}</style>
+      <Sidebar role={currentUser.role} view={view} onNavigate={handleNavigate} open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      <div className="flex-1 flex flex-col" style={{ minWidth: 0 }}>
+        <Header
+          user={currentUser}
+          onToggleSidebar={() => setSidebarOpen((o) => !o)}
+          notifOpen={notifOpen}
+          setNotifOpen={setNotifOpen}
+          notifications={state.notifications}
+          onMarkRead={(id) => dispatch({ type: "MARK_NOTIF_READ", id })}
+          onMarkAllRead={() => dispatch({ type: "MARK_ALL_READ" })}
+          onViewNotification={(incidentId) => handleNavigate("alertDetail", incidentId)}
+          onLogout={handleLogout}
+          pageTitle={pageTitle}
+        />
+        <main className="flex-1 p-4 md:p-6" style={{ maxWidth: "96rem", width: "100%", margin: "0 auto" }}>
+          {demoRunning && <DemoStepper step={demoStep} />}
+          {view === "dashboard" && <DashboardPage state={state} onNavigate={handleNavigate} onRunDemo={runDemoScenario} onReset={requestReset} demoRunning={demoRunning} demoStep={demoStep} />}
+          {view === "monitoring" && <LiveMonitoringPage state={state} dispatch={dispatch} simRunning={simRunning} onToggleSim={toggleSimulation} />}
+          {view === "alerts" && <AlertsPage state={state} onNavigate={handleNavigate} />}
+          {view === "alertDetail" && <AlertDetailPage state={state} dispatch={dispatch} alertId={selectedAlertId} onNavigate={handleNavigate} addToast={addToast} />}
+          {view === "maintenance" && <MaintenancePage state={state} dispatch={dispatch} onNavigate={handleNavigate} addToast={addToast} role={currentUser.role} currentUser={currentUser} />}
+          {view === "report" && <StudentReportPage state={state} dispatch={dispatch} currentUser={currentUser} addToast={addToast} />}
+          {view === "map" && <HostelMapPage state={state} onNavigate={handleNavigate} />}
+          {view === "analytics" && <AnalyticsPage state={state} />}
+          {view === "reports" && <ReportsPage state={state} addToast={addToast} />}
+          {view === "users" && <UsersPage />}
+          {view === "settings" && <SettingsPage currentUser={currentUser} />}
+        </main>
+      </div>
+
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+
+      {confirmReset && (
+        <Modal title="Reset demo data?" onClose={() => setConfirmReset(false)} width="24rem">
+          <p className="text-sm mb-4" style={{ color: C.inkSoft }}>
+            This clears all alerts, assignments and reports you've created in this session and restores the original seed data. This can't be undone.
+          </p>
+          <div className="flex gap-2">
+            <button onClick={confirmDoReset} className="rounded-md px-3 py-2 text-sm font-medium text-white" style={{ background: C.red }}>Reset data</button>
+            <button onClick={() => setConfirmReset(false)} className="rounded-md px-3 py-2 text-sm font-medium" style={{ border: `1px solid ${C.border}`, color: C.inkSoft }}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+const __ffRoot = ReactDOM.createRoot(document.getElementById("root"));
+__ffRoot.render(<App />);
+
+</script>
+</body>
+</html>
